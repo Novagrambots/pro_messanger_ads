@@ -174,6 +174,9 @@ CORS_ALLOW_METHODS = [
 # REST Framework settings
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
+        # Сначала пробуем токен AdGram (так входят рекламодатели). Если подпись не AdGram —
+        # токен проверяет simplejwt (свой логин new_dvs: модераторы и суперадмин)
+        'apps.account.authentication.AdGramJWTAuthentication',
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
@@ -198,6 +201,11 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': False,
     'BLACKLIST_AFTER_ROTATION': True,
 }
+
+# Общий логин с AdGram: секрет, которым бэкенд AdGram подписывает свои JWT (HS256).
+# Пусто → вход по токенам AdGram выключен. Должен отличаться от SECRET_KEY
+# (иначе ломается свой логин) — это проверяется при старте в apps/account/apps.py.
+ADGRAM_JWT_SECRET = os.getenv('ADGRAM_JWT_SECRET', '')
 
 # API Documentation
 SPECTACULAR_SETTINGS = {

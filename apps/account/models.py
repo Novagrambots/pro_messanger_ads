@@ -23,6 +23,12 @@ class CustomUser(AbstractUser):
         verbose_name='Telegram ID', null=True, blank=True, unique=True,
         help_text='Числовой id пользователя в Telegram'
     )
+    # id пользователя в AdGram (cuid из его JWT). Заполнен только у тех, кто вошёл через AdGram.
+    # unique уже создаёт индекс, отдельный db_index не нужен
+    adgram_user_id = models.CharField(
+        verbose_name='AdGram user ID', max_length=64, null=True, blank=True, unique=True,
+        help_text='userId из токена AdGram'
+    )
 
     class Meta:
         verbose_name = 'User'

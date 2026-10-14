@@ -4,7 +4,8 @@ from drf_spectacular.utils import extend_schema_field
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 
-from apps.billing.models import Balance
+from apps.account.authentication import ADGRAM_USERNAME_PREFIX
+from apps.account.services import create_user_with_balance
 
 
 User = get_user_model()
@@ -21,6 +22,13 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         # модератора назначает только суперадмин
         fields = ('username', 'password', 'password2', 'email')
 
+    def validate_username(self, value):
+        # Имена "ag_..." зарезервированы под юзеров AdGram — иначе можно заранее
+        # занять чужое имя и сломать человеку первый вход через AdGram
+        if value.lower().startswith(ADGRAM_USERNAME_PREFIX):
+            raise serializers.ValidationError(f'Имена, начинающиеся с "{ADGRAM_USERNAME_PREFIX}", зарезервированы')
+        return value
+
     def validate(self, attrs):
         if attrs['password'] != attrs['password2']:
             raise serializers.ValidationError({"password": "Пароли не совпадают"})
@@ -29,16 +37,12 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         validated_data.pop('password2')
 
-        user = User.objects.create_user(
+        # Пользователь сразу с балансом — тот же путь, что и при первом входе через AdGram
+        return create_user_with_balance(
             username=validated_data['username'],
             email=validated_data.get('email', ''),
             password=validated_data['password'],
         )
-
-        # Создаем баланс для нового пользователя
-        Balance.objects.create(user=user, amount=0.00)
-
-        return user
 
 
 class UserLoginSerializer(TokenObtainPairSerializer):
@@ -58,7 +62,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['user_id', 'username', 'email', 'first_name', 'last_name', 'date_joined', 'role']
+        fields = ['user_id', 'username', 'email', 'first_name', 'last_name', 'date_joined', 'role',
+                  'adgram_user_id']
 
 
 class AdminUserSerializer(serializers.ModelSerializer):

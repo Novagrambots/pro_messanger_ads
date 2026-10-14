@@ -6,9 +6,9 @@ from apps.account.models import CustomUser
 
 @admin.register(CustomUser)
 class UserAdmin(UserAdmin):
-    list_display = ('username', 'user_id', 'telegram_id', 'role')
+    list_display = ('username', 'user_id', 'telegram_id', 'adgram_user_id', 'role')
     list_filter = ('role', 'is_superuser', 'is_active')
-    search_fields = ('username', 'user_id', 'telegram_id')
+    search_fields = ('username', 'user_id', 'telegram_id', 'adgram_user_id')
     list_per_page = 20
     search_help_text = 'USERNAME ni yoki USER ID ni kiritng'
 
