@@ -68,20 +68,21 @@ def check_budget(user, budget):
 
 # ======================================= Списание при создании заказа =======================================
 
-def charge(user, paid, order_type, create_order):
+def charge(user, paid, order_type, create_order, reason=MoneyOperation.Reason.CREATE):
     """
-    Списывает paid при создании заказа. create_order(budget) создаёт заказ и возвращает его —
-    вызывается внутри нашей транзакции. Бюджет заказа = оплачено + carry (carry обнуляется).
+    Списывает paid. create_order(budget) вызывается внутри нашей транзакции и возвращает
+    заказ: создаёт новый (CREATE) или увеличивает бюджет существующего под select_for_update
+    (TOP_UP). В бюджет уходит оплачено + carry (carry обнуляется).
 
     Вызывать ВНЕ transaction.atomic: у AdGram запись PENDING должна закоммититься
     до похода в AdGram, а сам поход идёт без открытой транзакции БД.
     """
     if user.adgram_user_id:
-        return _charge_adgram(user, paid, order_type, create_order)
-    return _charge_local(user, paid, order_type, create_order)
+        return _charge_adgram(user, paid, order_type, create_order, reason)
+    return _charge_local(user, paid, order_type, create_order, reason)
 
 
-def _charge_local(user, paid, order_type, create_order):
+def _charge_local(user, paid, order_type, create_order, reason):
     with transaction.atomic():
         balance = _lock_balance(user)
         if balance.amount < paid:
@@ -95,21 +96,21 @@ def _charge_local(user, paid, order_type, create_order):
         order = create_order(paid + carry)
         MoneyOperation.objects.create(
             user=user, order_type=order_type, order_id=order.pk,
-            kind=MoneyOperation.Kind.DEBIT, reason=MoneyOperation.Reason.CREATE,
+            kind=MoneyOperation.Kind.DEBIT, reason=reason,
             wallet=MoneyOperation.Wallet.LOCAL, status=MoneyOperation.Status.DONE,
             exact_amount=paid, wallet_amount=paid, carry_delta=-carry, balance_after=balance.amount,
         )
     return order
 
 
-def _charge_adgram(user, paid, order_type, create_order):
+def _charge_adgram(user, paid, order_type, create_order, reason):
     if not adgram_client.is_configured():
         raise PaymentUnavailable('Оплата через AdGram временно недоступна, попробуйте позже')
 
     # a) Фиксируем намерение списать и сразу коммитим — запись переживёт даже падение процесса
     op = MoneyOperation.objects.create(
         user=user, order_type=order_type,
-        kind=MoneyOperation.Kind.DEBIT, reason=MoneyOperation.Reason.CREATE,
+        kind=MoneyOperation.Kind.DEBIT, reason=reason,
         wallet=MoneyOperation.Wallet.ADGRAM, status=MoneyOperation.Status.PENDING,
         exact_amount=paid, wallet_amount=paid, attempts=1,
     )

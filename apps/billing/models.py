@@ -99,6 +99,8 @@ class MoneyOperation(models.Model):
         COMPENSATION = 'COMPENSATION', 'Компенсация списания без заказа'
         ADMIN_DEPOSIT = 'ADMIN_DEPOSIT', 'Пополнение суперадмином'
         LEGACY_FIX = 'LEGACY_FIX', 'Возврат старых потерь'
+        TOP_UP = 'TOP_UP', 'Пополнение бюджета объявления'
+        DELETE = 'DELETE', 'Объявление удалено'
 
     class Wallet(models.TextChoices):
         ADGRAM = 'ADGRAM', 'AdGram'
@@ -112,6 +114,7 @@ class MoneyOperation(models.Model):
     class OrderType(models.TextChoices):
         SEARCH_ADS = 'search_ads', 'Реклама в поиске'
         CHAT_ADS = 'chat_ads', 'Реклама в чатах'
+        ADS = 'ads', 'Объявление'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     # PROTECT: юзера с денежной историей удалить нельзя — история важнее

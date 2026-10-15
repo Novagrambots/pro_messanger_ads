@@ -60,6 +60,7 @@ INSTALLED_APPS = [
     'apps.moderation',
     'apps.announcements',
     'apps.notifications',
+    'apps.ads',
 ]
 
 MIDDLEWARE = [
@@ -225,6 +226,11 @@ SPECTACULAR_SETTINGS = {
     'ENUM_NAME_OVERRIDES': {
         'DevicePlatformEnum': 'apps.notifications.models.Device.Platform',
         'AdPlatformEnum': 'apps.chat_ads.models.ChatAdOrder.Platform',
+        # Поле status есть у старых заказов, объявлений v2 и журнала денег — разные наборы значений
+        'AdStatusEnum': 'apps.ads.models.AdStatus',
+        'AdInitialStatusEnum': 'apps.ads.models.InitialStatus',
+        'MoneyOperationStatusEnum': 'apps.billing.models.MoneyOperation.Status',
+        'StatusEnum': 'apps.common.models.ModerationStatus',  # старое имя у старых заказов — не меняем
     },
     "SWAGGER_UI_SETTINGS": {
         "persistAuthorization": True,  # не сбрасывать авторизацию

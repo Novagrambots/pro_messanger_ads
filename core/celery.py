@@ -22,6 +22,11 @@ app.conf.beat_schedule = {
         'task': 'apps.billing.tasks.process_money_operations',
         'schedule': crontab(),
     },
+    # Объявления v2: наступил start_date → ACTIVE, наступил end_date → ON_HOLD
+    'apply-ad-dates-every-minute': {
+        'task': 'apps.ads.tasks.apply_ad_dates',
+        'schedule': crontab(),
+    },
     # Возврат дробного остатка бюджета завершённых заказов
     'refund-completed-orders-every-5-minutes': {
         'task': 'apps.billing.tasks.refund_completed_orders',
