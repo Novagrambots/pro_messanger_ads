@@ -5,6 +5,7 @@ from django.db import models
 from django.conf import settings
 from django.core.validators import MinValueValidator
 
+from apps.billing.models import MoneyOperation
 from apps.common.models import ModerationMixin, ModerationStatus
 
 
@@ -72,7 +73,8 @@ class Order(ModerationMixin):
     # Параметры заказа
     spm = models.DecimalField(verbose_name='SPM', max_digits=10, decimal_places=2,
                               help_text='Spend per mille (стоимость за 1000 показов)')
-    budget = models.DecimalField(verbose_name='Budget', max_digits=15, decimal_places=2,
+    # 6 знаков: в бюджет при создании уходит дробный остаток прошлых возвратов (Balance.carry)
+    budget = models.DecimalField(verbose_name='Budget', max_digits=19, decimal_places=6,
                                  validators=[MinValueValidator(Decimal('0.01'))])
 
     # Поля для управления показами
@@ -185,7 +187,7 @@ class Order(ModerationMixin):
             self.completed = False
 
             # Возврат считает общий метод миксина (он же обнуляет remaining_views)
-            refund_amount = self._refund_unspent()
+            refund_amount = self._refund_unspent(MoneyOperation.Reason.CANCEL)
 
             self.save()
             return refund_amount

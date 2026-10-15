@@ -5,6 +5,7 @@ from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.billing.services import format_money
 from apps.common.models import ModerationStatus
 from apps.common.pagination import StandardResultsSetPagination
 from apps.common.permissions import IsModerator, IsSuperAdmin
@@ -215,7 +216,8 @@ class BaseModerationDecisionView(APIView):
             'status': order.status,
         }
         if refund_amount is not None:
-            response_data['refund_amount'] = str(refund_amount)
+            # Возврат точный (до 6 знаков) — ровные суммы отдаём как раньше: "45.00"
+            response_data['refund_amount'] = format_money(refund_amount)
 
         return Response(response_data, status=status.HTTP_200_OK)
 

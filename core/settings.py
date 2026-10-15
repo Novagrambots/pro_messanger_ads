@@ -207,6 +207,12 @@ SIMPLE_JWT = {
 # (иначе ломается свой логин) — это проверяется при старте в apps/account/apps.py.
 ADGRAM_JWT_SECRET = os.getenv('ADGRAM_JWT_SECRET', '')
 
+# Общий баланс с AdGram: внутреннее API AdGram (заголовок X-Internal-Key).
+# Не заданы → юзеры AdGram не могут создавать заказы (503), а возвраты копятся
+# в журнале со статусом PENDING и уйдут, когда настройки появятся.
+ADGRAM_INTERNAL_URL = os.getenv('ADGRAM_INTERNAL_URL', '').rstrip('/')
+ADGRAM_INTERNAL_KEY = os.getenv('ADGRAM_INTERNAL_KEY', '')
+
 # API Documentation
 SPECTACULAR_SETTINGS = {
     'TITLE': 'NovaGram Business API',

@@ -23,9 +23,10 @@ class ChatAdOrderAdmin(admin.ModelAdmin):
     # Статус, флаги жизненного цикла и денежные поля руками в админке не меняем —
     # иначе можно обойти возврат денег (например, реанимировать отменённый заказ,
     # по которому деньги уже вернули). Для решений есть API модерации (или action «Одобрить»)
-    readonly_fields = ['status', 'moderated_by', 'moderated_at', 'is_active', 'cancelled',
+    # user тоже readonly: смена владельца увела бы возврат денег другому человеку
+    readonly_fields = ['user', 'status', 'moderated_by', 'moderated_at', 'is_active', 'cancelled',
                        'completed', 'remaining_views', 'shown_views', 'total_views',
-                       'budget', 'spm', 'created_at', 'updated_at']
+                       'budget', 'spm', 'refunded', 'created_at', 'updated_at']
     list_per_page = 30
     actions = ['approve_orders']
 

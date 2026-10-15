@@ -10,7 +10,7 @@ from rest_framework.views import APIView
 from apps.common.models import ModerationStatus
 from apps.common.pagination import StandardResultsSetPagination
 from apps.common.permissions import HasServerApiKey
-from apps.common.schema import ERROR_RESPONSE, SERVER_API_KEY_AUTH
+from apps.common.schema import ERROR_RESPONSE, ORDER_CREATE_ERROR_RESPONSES, SERVER_API_KEY_AUTH
 
 from .models import Order, Tag, AdView
 from .serializers import (CreateChannelOrderSerializer, ResponsesMessageSerializer, OrderDetailSerializer,
@@ -23,7 +23,8 @@ class CreateChannelOrderView(generics.CreateAPIView):
     serializer_class = CreateChannelOrderSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    @extend_schema(request=CreateChannelOrderSerializer, responses=ResponsesMessageSerializer)
+    @extend_schema(request=CreateChannelOrderSerializer,
+                   responses={201: ResponsesMessageSerializer, **ORDER_CREATE_ERROR_RESPONSES})
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)

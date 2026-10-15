@@ -17,4 +17,14 @@ app.conf.beat_schedule = {
         'schedule': crontab(minute=0, hour=0),
         # 'schedule': crontab(),
     },
+    # Деньги AdGram: добивание PENDING, компенсация списаний без заказа, алерты о зависших
+    'process-money-operations-every-minute': {
+        'task': 'apps.billing.tasks.process_money_operations',
+        'schedule': crontab(),
+    },
+    # Возврат дробного остатка бюджета завершённых заказов
+    'refund-completed-orders-every-5-minutes': {
+        'task': 'apps.billing.tasks.refund_completed_orders',
+        'schedule': crontab(minute='*/5'),
+    },
 }

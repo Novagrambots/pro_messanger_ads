@@ -1,4 +1,4 @@
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
@@ -44,45 +44,46 @@ class ModerationMixin(models.Model):
         blank=True,
         default='',
     )
+    # Сколько уже вернули по заказу (точно). Остаток к возврату = budget − потрачено − refunded
+    refunded = models.DecimalField(
+        verbose_name='Возвращено',
+        max_digits=19,
+        decimal_places=6,
+        default=Decimal('0'),
+    )
 
     class Meta:
         abstract = True
 
-    def _refund_unspent(self):
+    def spent_amount(self):
+        """Сколько потрачено по заказу: показано × SPM / 1000, точно, без округлений"""
+        return Decimal(self.shown_views) * self.spm / Decimal(1000)
+
+    def unrefunded_amount(self):
+        """Сколько ещё не вернули: budget − потрачено − уже возвращено (у закрытого заказа — 0)"""
+        return self.budget - self.spent_amount() - self.refunded
+
+    def _refund_unspent(self, reason):
         """
-        Возвращает пользователю деньги за неизрасходованные показы и обнуляет остаток.
-
-        Если не было ни одного показа — возвращаем бюджет целиком: из-за int()-усечения
-        в total_views возврат по формуле был бы чуть меньше бюджета (терялись бы копейки).
+        Возвращает пользователю весь неизрасходованный остаток бюджета и останавливает показы.
+        Деньги двигает billing.services.refund (AdGram или локальный кошелёк),
+        повторный вызов вернёт 0. Возвращает точную сумму возврата.
         """
-        if self.shown_views == 0:
-            refund_amount = self.budget
-        else:
-            refund_amount = (Decimal(self.remaining_views) / Decimal(1000)) * self.spm
-            # Баланс хранится с точностью 2 знака — округляем вниз до копеек,
-            # как и выплаты партнёрам (иначе база округлила бы сама и непредсказуемо)
-            refund_amount = refund_amount.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
-
-        if refund_amount > 0:
-            self.user.balance.deposit(refund_amount)
-
+        # Импорт внутри метода — иначе циклический импорт common <-> billing
+        from apps.billing.services import refund
+        refund_amount = refund(self, reason)
         self.remaining_views = 0
         return refund_amount
 
     def get_refund_amount(self):
         """
         Сумма, которую вернём при отмене/блокировке (для отображения пользователю).
-        Считает так же, как реальный возврат в _refund_unspent().
+        Считает по тому же правилу, что и реальный возврат.
         """
         # По отменённому/отклонённому/заблокированному возвращать уже нечего
         if self.cancelled or self.status in (ModerationStatus.REJECTED, ModerationStatus.BLOCKED):
             return Decimal('0')
-        if self.shown_views == 0:
-            return self.budget
-        if self.remaining_views > 0:
-            refund_amount = (Decimal(self.remaining_views) / Decimal(1000)) * self.spm
-            return refund_amount.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
-        return Decimal('0')
+        return max(self.unrefunded_amount(), Decimal('0'))
 
     def set_initial_moderation_status(self):
         """
@@ -122,7 +123,8 @@ class ModerationMixin(models.Model):
         """
         if self.status != ModerationStatus.PENDING or self.cancelled:
             return None
-        refund_amount = self._refund_unspent()
+        from apps.billing.models import MoneyOperation
+        refund_amount = self._refund_unspent(MoneyOperation.Reason.REJECT)
         self.status = ModerationStatus.REJECTED
         self.is_active = False
         self.reject_reason = reason
@@ -141,7 +143,8 @@ class ModerationMixin(models.Model):
         """
         if self.status not in (ModerationStatus.PENDING, ModerationStatus.APPROVED) or self.cancelled:
             return None
-        refund_amount = self._refund_unspent()
+        from apps.billing.models import MoneyOperation
+        refund_amount = self._refund_unspent(MoneyOperation.Reason.BLOCK)
         self.status = ModerationStatus.BLOCKED
         self.is_active = False
         self.reject_reason = reason

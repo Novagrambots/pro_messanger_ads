@@ -29,6 +29,12 @@ class CustomUser(AbstractUser):
         verbose_name='AdGram user ID', max_length=64, null=True, blank=True, unique=True,
         help_text='userId из токена AdGram'
     )
+    # Читаемое имя из токена AdGram — только для отображения (в проверке доступа не участвует).
+    # Обновляется при входе, если в AdGram его поменяли
+    adgram_username = models.CharField(
+        verbose_name='Имя в AdGram', max_length=255, blank=True, default='',
+        help_text='username из токена AdGram'
+    )
 
     class Meta:
         verbose_name = 'User'

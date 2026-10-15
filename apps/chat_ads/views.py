@@ -5,15 +5,15 @@ from rest_framework import generics, status, permissions
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from django.db import transaction
-from rest_framework.exceptions import ValidationError
 from rest_framework.views import APIView
 
 from apps.common.models import ModerationStatus
 from apps.common.pagination import StandardResultsSetPagination
 from apps.common.permissions import HasServerApiKey
-from apps.common.schema import ERROR_RESPONSE, MESSAGE_RESPONSE, SERVER_API_KEY_AUTH
+from apps.common.schema import ERROR_RESPONSE, MESSAGE_RESPONSE, ORDER_CREATE_ERROR_RESPONSES, SERVER_API_KEY_AUTH
 
-from apps.billing.models import Balance
+from apps.billing.models import MoneyOperation
+from apps.billing.services import charge
 from apps.partner.models import ChannelEarning
 from .models import ChatAdOrder, ChatAdMedia, ChatAdView
 from .serializers import ChatAdMediaSerializer, ChatAdOrderSerializer, ChatAdOrderActivationSerializer, \
@@ -34,7 +34,8 @@ class ChatAdMediaUploadView(generics.CreateAPIView):
         serializer.save(user=self.request.user)
 
 
-@extend_schema(request=ChatAdOrderSerializer, responses=ChatAdResponsesMessageSerializer)
+@extend_schema(request=ChatAdOrderSerializer,
+               responses={201: ChatAdResponsesMessageSerializer, **ORDER_CREATE_ERROR_RESPONSES})
 class ChatAdOrderCreateView(generics.CreateAPIView):
     """
     Создание заказа и оплата.
@@ -45,25 +46,23 @@ class ChatAdOrderCreateView(generics.CreateAPIView):
 
     def perform_create(self, serializer):
         user = self.request.user
-        budget = serializer.validated_data['budget']
 
         # Получаем объект медиа из validated_data (валидатор уже вернул объект, а не ID)
         media_obj = serializer.validated_data.pop('media_id', None)
 
-        with transaction.atomic():
-            # 1. Списание денег
-            balance = Balance.objects.select_for_update().get(user=user)
-            if balance.amount < budget:
-                raise ValidationError("Недостаточно средств на балансе")
-            balance.withdraw(budget)
+        def create_order(budget):
+            """Сохранение заказа. Вызывает billing внутри своей транзакции, уже после списания денег"""
+            # budget = оплачено + дробный остаток прошлых возвратов (его считает billing)
+            order = serializer.save(user=user, media_url=media_obj, budget=budget)
 
-            # 2. Сохранение заказа
-            order = serializer.save(user=user, media_url=media_obj)
-
-            # 3. Помечаем медиа как использованное (чтобы не удалить сборщиком мусора)
+            # Помечаем медиа как использованное (чтобы не удалить сборщиком мусора)
             if media_obj:
                 media_obj.is_linked = True
                 media_obj.save(update_fields=['is_linked'])
+            return order
+
+        # Деньги списывает billing (кошелёк AdGram или локальный баланс)
+        charge(user, serializer.validated_data['budget'], MoneyOperation.OrderType.CHAT_ADS, create_order)
 
     def create(self, request, *args, **kwargs):
         """

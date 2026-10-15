@@ -1,8 +1,8 @@
-from django.db import transaction
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_field
 
-from apps.billing.models import Balance
+from apps.billing.models import MoneyOperation
+from apps.billing.services import charge, check_budget
 from apps.common.models import ModerationStatus
 from apps.search_ads.models import Channel, Order, Tag
 
@@ -25,6 +25,10 @@ class CreateChannelOrderSerializer(serializers.Serializer):
     # is_active от клиента не принимаем: новый заказ всегда уходит на модерацию
     # и включается только после одобрения модератором
 
+    def validate_budget(self, value):
+        # У юзера AdGram — только целые сумы
+        return check_budget(self.context['request'].user, value)
+
     def validate(self, data):
         if data['spm'] <= 0:
             raise serializers.ValidationError({"spm": "SPM должен быть больше 0."})
@@ -37,23 +41,10 @@ class CreateChannelOrderSerializer(serializers.Serializer):
     def create(self, validated_data):
         user = self.context['request'].user
         tag_names = validated_data.get('tags', [])
-        budget = validated_data['budget']
 
-        # Используем транзакцию, чтобы все создалось или ничего
-        with transaction.atomic():
-            # 1. Блокируем строку баланса (select_for_update), чтобы два параллельных
-            # заказа не могли оба пройти проверку и уйти в минус (защита от гонки).
-            balance = Balance.objects.select_for_update().get(user=user)
-
-            # 2. Проверяем баланс и списываем средства уже под блокировкой
-            if balance.amount < budget:
-                raise serializers.ValidationError(
-                    {"budget": f"Недостаточно средств. Доступно: {balance.amount}"}
-                )
-            if not balance.withdraw(budget):
-                raise serializers.ValidationError({"budget": "Ошибка списания средств"})
-
-            # 3. Создаем или обновляем канал
+        def create_order(budget):
+            """Канал + заказ. Вызывает billing внутри своей транзакции, уже после списания денег"""
+            # 1. Создаем или обновляем канал
             channel, _ = Channel.objects.update_or_create(
                 channel_id=validated_data['channel_id'],
                 user=user,
@@ -64,7 +55,8 @@ class CreateChannelOrderSerializer(serializers.Serializer):
             if tag_names:
                 channel.add_tags(tag_names)
 
-            # 4. Создаем заказ (статус PENDING и is_active=False выставит Order.save())
+            # 2. Создаем заказ (статус PENDING и is_active=False выставит Order.save()).
+            # budget = оплачено + дробный остаток прошлых возвратов (его считает billing)
             order = Order.objects.create(
                 channel_id=channel,
                 user=user,
@@ -72,20 +64,22 @@ class CreateChannelOrderSerializer(serializers.Serializer):
                 order_name=validated_data['order_name'],
                 platform=validated_data['platform'],
                 spm=validated_data['spm'],
-                budget=validated_data['budget'],
+                budget=budget,
                 max_views_per_user=validated_data['max_views_per_user'],
             )
 
-            # 5. Явно привязываем теги к заказу (безопаснее, чем через _tag_names)
+            # 3. Явно привязываем теги к заказу (безопаснее, чем через _tag_names)
             if tag_names:
                 for tag_name in tag_names:
                     # strip() и lower() для чистоты данных
                     tag, _ = Tag.objects.get_or_create(name=tag_name.strip().lower())
                     order.tags.add(tag)
+            return order
 
-        # Возвращаем созданный объект order.
-        # View не использует этот объект для ответа (там ResponseMessage), поэтому это безопасно.
-        return order
+        # Деньги списывает billing (кошелёк AdGram или локальный баланс), заказ создаётся
+        # в той же транзакции, что и закрытие списания.
+        # View не использует возвращённый order для ответа (там ResponseMessage).
+        return charge(user, validated_data['budget'], MoneyOperation.OrderType.SEARCH_ADS, create_order)
 
 
 class OrderDetailSerializer(serializers.ModelSerializer):

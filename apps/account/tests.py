@@ -20,10 +20,10 @@ ADGRAM_USER_ID = 'clxadgramuser0001'
 
 
 def make_adgram_token(user_id=ADGRAM_USER_ID, role='USER', secret=ADGRAM_SECRET,
-                      expires_in=timedelta(days=7), with_exp=True):
+                      expires_in=timedelta(days=7), with_exp=True, username='adgram_name'):
     """Токен как у AdGram: HS256, payload {userId, username, role}, срок 7 дней"""
     now = datetime.now(timezone.utc)
-    payload = {'username': 'adgram_name', 'role': role, 'iat': now}
+    payload = {'username': username, 'role': role, 'iat': now}
     if user_id is not None:
         payload['userId'] = user_id
     if with_exp:
@@ -248,6 +248,31 @@ class AdGramAuthTests(TestCase):
 
         response = adgram_client(make_adgram_token()).get('/api/auth/profile/')
         self.assertEqual(response.status_code, 401)
+
+    def test_adgram_username_saved_and_updated(self):
+        """Имя из AdGram — только для отображения: пишем при создании, обновляем, если поменяли"""
+        adgram_client(make_adgram_token(username='Ali')).get('/api/auth/profile/')
+        user = User.objects.get(adgram_user_id=ADGRAM_USER_ID)
+        self.assertEqual(user.adgram_username, 'Ali')
+
+        adgram_client(make_adgram_token(username='Ali Valiyev')).get('/api/auth/profile/')
+        user.refresh_from_db()
+        self.assertEqual(user.adgram_username, 'Ali Valiyev')
+
+        # Не строка — имя не трогаем, вход при этом работает
+        response = adgram_client(make_adgram_token(username=None)).get('/api/auth/profile/')
+        self.assertEqual(response.status_code, 200)
+        user.refresh_from_db()
+        self.assertEqual(user.adgram_username, 'Ali Valiyev')
+
+    def test_same_adgram_username_no_extra_update(self):
+        """Имя не поменялось — лишнего UPDATE на каждый запрос нет"""
+        client = adgram_client(make_adgram_token(username='Ali'))
+        client.get('/api/auth/profile/')
+        with patch.object(User.objects, 'filter', wraps=User.objects.filter) as user_filter:
+            client.get('/api/auth/profile/')
+        # filter вызывается один раз — поиск юзера; второго (на UPDATE имени) нет
+        self.assertEqual(user_filter.call_count, 1)
 
     def test_no_token_gives_401(self):
         """Первый класс аутентификации отдаёт WWW-Authenticate — иначе DRF ответил бы 403"""

@@ -40,6 +40,7 @@ class Notification(models.Model):
         ORDER_APPROVED = 'ORDER_APPROVED', 'Заказ одобрен'
         ORDER_REJECTED = 'ORDER_REJECTED', 'Заказ отклонён'
         ORDER_BLOCKED = 'ORDER_BLOCKED', 'Заказ заблокирован'
+        MONEY_ALERT = 'MONEY_ALERT', 'Проблема с платежом'
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                              related_name='notifications', verbose_name='Кому')

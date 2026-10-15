@@ -59,7 +59,7 @@ class AdGramJWTAuthentication(authentication.BaseAuthentication):
         if payload is None:
             return None  # токен не от AdGram — пусть проверяет simplejwt
 
-        user = self._get_or_create_user(payload.get('userId'))
+        user = self._get_or_create_user(payload.get('userId'), self._clean_username(payload.get('username')))
         return user, payload
 
     def authenticate_header(self, request):
@@ -88,24 +88,36 @@ class AdGramJWTAuthentication(authentication.BaseAuthentication):
             # Подпись наша, но токен кривой (нет exp, дата выдачи в будущем и т.п.)
             raise exceptions.AuthenticationFailed('Некорректный токен AdGram')
 
-    def _get_or_create_user(self, adgram_user_id):
+    @staticmethod
+    def _clean_username(name):
+        """Имя из токена — только для отображения. Не строка — не трогаем (None)"""
+        if not isinstance(name, str):
+            return None
+        return name.strip()[:255]
+
+    def _get_or_create_user(self, adgram_user_id, adgram_username):
         if not isinstance(adgram_user_id, str) or not ADGRAM_USER_ID_RE.fullmatch(adgram_user_id):
             raise exceptions.AuthenticationFailed('В токене AdGram нет корректного userId')
 
         user = User.objects.filter(adgram_user_id=adgram_user_id).first()
         if user is None:
-            user = self._create_user(adgram_user_id)
+            user = self._create_user(adgram_user_id, adgram_username)
+        elif adgram_username is not None and adgram_username != user.adgram_username:
+            # Имя в AdGram поменяли — обновляем одним UPDATE (только когда оно реально изменилось)
+            User.objects.filter(pk=user.pk).update(adgram_username=adgram_username)
+            user.adgram_username = adgram_username
 
         if not user.is_active:
             raise exceptions.AuthenticationFailed('Пользователь отключён')
         return user
 
-    def _create_user(self, adgram_user_id):
+    def _create_user(self, adgram_user_id, adgram_username):
         """Первый вход юзера AdGram: создаём рекламодателя с балансом (как при регистрации)"""
         try:
             return create_user_with_balance(
                 username=ADGRAM_USERNAME_PREFIX + adgram_user_id,
                 adgram_user_id=adgram_user_id,
+                adgram_username=adgram_username or '',
             )
         except IntegrityError:
             # Два первых запроса пришли одновременно: второй упал на unique — берём того, кого создал первый

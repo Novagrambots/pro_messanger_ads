@@ -67,3 +67,14 @@ def notify_order_decision(order):
     body = body_template.format(name=order.order_name, reason=order.reject_reason)
     payload = {'order_id': str(order.order_id), 'order_type': order._meta.app_label}
     notify(order.user, title, body, notif_type, payload)
+
+
+def notify_money_alert(operation, problem):
+    """Денежная операция зависла или AdGram ответил ошибкой настройки — сообщаем суперадминам"""
+    User = get_user_model()
+    body = (f'{operation.get_kind_display()} {operation.wallet_amount} '
+            f'({operation.user.username}, операция {operation.pk}): {problem}')
+    payload = {'operation_id': str(operation.pk)}
+    for admin in User.objects.filter(is_superuser=True, is_active=True):
+        notify(admin, 'Проблема с платежом', body[:1000], Notification.Type.MONEY_ALERT, payload)
+

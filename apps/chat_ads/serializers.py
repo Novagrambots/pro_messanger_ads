@@ -5,6 +5,7 @@ from django.db import transaction
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from apps.billing.services import check_budget
 from apps.common.models import ModerationStatus
 from .models import ChatAdOrder, ChatAdView, ChatAdMedia
 
@@ -101,10 +102,10 @@ class ChatAdOrderSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.DecimalField(max_digits=10, decimal_places=2))
     def validate_budget(self, value):
-        """Валидация бюджета"""
+        """Валидация бюджета: > 0, не больше 2 знаков, у юзера AdGram — только целые сумы"""
         if value <= Decimal('0'):
             raise serializers.ValidationError("Бюджет должен быть больше 0")
-        return value
+        return check_budget(self.context['request'].user, value)
 
     @extend_schema_field(serializers.DecimalField(max_digits=10, decimal_places=2))
     def validate_spm(self, value):
