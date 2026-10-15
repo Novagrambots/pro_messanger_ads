@@ -5,7 +5,8 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from apps.ads import validators
-from apps.ads.models import Ad, AdPricing, AdStateError, InitialStatus, Placement, default_schedule
+from apps.ads.models import (Ad, AdPricing, AdRevision, AdStateError, InitialStatus, Placement,
+                            default_schedule)
 from apps.billing.models import MoneyOperation
 from apps.billing.services import charge, check_budget, format_money
 
@@ -22,6 +23,16 @@ class MoneyField(serializers.Field):
         return format_money(value)
 
 
+class AdRevisionSerializer(serializers.ModelSerializer):
+    """Правка креатива (ревизия)"""
+
+    class Meta:
+        model = AdRevision
+        fields = ['id', 'text', 'show_channel_picture', 'other_info', 'status', 'reason',
+                  'created_at', 'moderated_at']
+        read_only_fields = fields
+
+
 class AdSerializer(serializers.ModelSerializer):
     """Объявление глазами владельца (список и детали)"""
     ad_format = serializers.CharField(read_only=True, help_text='search / bot / users / channels')
@@ -29,6 +40,10 @@ class AdSerializer(serializers.ModelSerializer):
     spent = MoneyField()
     refunded = MoneyField()
     remaining_budget = MoneyField(help_text='Остаток: budget − spent − refunded')
+    pending_revision = serializers.SerializerMethodField(
+        help_text='Правка креатива на проверке (пока её не одобрят, крутится прежний вариант)')
+    last_declined_revision = serializers.SerializerMethodField(
+        help_text='Последняя правка, если её отклонили (с причиной); после новой правки — null')
 
     class Meta:
         model = Ad
@@ -36,9 +51,20 @@ class AdSerializer(serializers.ModelSerializer):
             'id', 'placement', 'ad_format', 'title', 'text', 'url', 'show_channel_picture', 'other_info',
             'cpm', 'budget', 'spent', 'refunded', 'remaining_budget', 'daily_limit', 'views_per_user_per_day',
             'status', 'initial_status', 'start_date', 'end_date', 'schedule', 'targeting',
-            'moderation_reason', 'terms_version', 'terms_accepted_at', 'created_at', 'updated_at',
+            'moderation_reason', 'pending_revision', 'last_declined_revision',
+            'terms_version', 'terms_accepted_at', 'created_at', 'updated_at',
         ]
         read_only_fields = fields
+
+    @extend_schema_field(AdRevisionSerializer(allow_null=True))
+    def get_pending_revision(self, obj):
+        revision = obj.pending_revision()
+        return AdRevisionSerializer(revision).data if revision else None
+
+    @extend_schema_field(AdRevisionSerializer(allow_null=True))
+    def get_last_declined_revision(self, obj):
+        revision = obj.last_declined_revision()
+        return AdRevisionSerializer(revision).data if revision else None
 
 
 class AdCreateSerializer(serializers.Serializer):
@@ -126,31 +152,36 @@ class AdCreateSerializer(serializers.Serializer):
 
         def create_ad(budget):
             # budget = оплачено + дробный остаток прошлых возвратов (его добавляет billing)
-            return Ad.objects.create(
-                user=user, budget=budget, terms_version=pricing.terms_version,
-                terms_accepted_at=timezone.now(), **validated_data,
-            )
+            ad = Ad(user=user, budget=budget, terms_version=pricing.terms_version,
+                    terms_accepted_at=timezone.now(), **validated_data)
+            ad.submit()  # на модерацию (у суперадмина — сразу одобрено)
+            return ad
 
         return charge(user, paid, MoneyOperation.OrderType.ADS, create_ad)
 
 
-# Что владелец может менять без модерации — остальное отдаёт 400 с причиной
-EDITABLE_FIELDS = {'cpm', 'daily_limit', 'views_per_user_per_day', 'status', 'start_date', 'end_date', 'schedule'}
-_CREATIVE_MESSAGE = 'Креатив меняется через повторную модерацию (будет на этапе 4)'
+# Что владелец может менять: сразу (настройки и title) или через модерацию (креатив).
+# Остальное отдаёт 400 с причиной
+SETTINGS_FIELDS = {'title', 'cpm', 'daily_limit', 'views_per_user_per_day', 'status', 'start_date', 'end_date',
+                   'schedule'}
+EDITABLE_FIELDS = SETTINGS_FIELDS | set(AdRevision.CREATIVE_FIELDS)
 FORBIDDEN_FIELD_MESSAGES = {
     'targeting': 'Таргетинг после создания не меняется',
     'placement': 'Место показа после создания не меняется',
-    'title': _CREATIVE_MESSAGE,
-    'text': _CREATIVE_MESSAGE,
-    'url': _CREATIVE_MESSAGE,
-    'show_channel_picture': _CREATIVE_MESSAGE,
-    'other_info': _CREATIVE_MESSAGE,
+    'url': 'Ссылка после создания не меняется',
     'budget': 'Бюджет пополняется через POST /api/ads/<id>/budget/',
 }
 
 
 class AdUpdateSerializer(serializers.Serializer):
-    """PATCH владельца: только то, что меняется без модерации"""
+    """
+    PATCH владельца. Настройки и title меняются сразу; креатив (text, show_channel_picture,
+    other_info) — через ревизию на модерации (если объявление уже одобрено).
+    """
+    title = serializers.CharField(required=False, max_length=255)
+    text = serializers.CharField(required=False, allow_blank=True)
+    show_channel_picture = serializers.BooleanField(required=False)
+    other_info = serializers.CharField(required=False, allow_blank=True, max_length=255)
     cpm = serializers.IntegerField(required=False, min_value=1)
     daily_limit = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     views_per_user_per_day = serializers.IntegerField(required=False, min_value=0, max_value=4)
@@ -168,10 +199,12 @@ class AdUpdateSerializer(serializers.Serializer):
                 raise serializers.ValidationError(forbidden)
         return super().to_internal_value(data)
 
-    def validate_cpm(self, value):
-        min_cpm = AdPricing.load().min_cpm(self.instance.placement, self.instance.show_channel_picture)
-        if value < min_cpm:
-            raise serializers.ValidationError(f"CPM can't be less than {min_cpm}")
+    def validate_text(self, value):
+        return validators.check_text(self.instance.placement, value)
+
+    def validate_show_channel_picture(self, value):
+        if value and self.instance.placement == Placement.SEARCH:
+            raise serializers.ValidationError('В рекламе в поиске фото канала нет')
         return value
 
     def validate_start_date(self, value):
@@ -182,6 +215,29 @@ class AdUpdateSerializer(serializers.Serializer):
 
     def validate_schedule(self, value):
         return validators.check_schedule(self.instance.placement, value)
+
+    def validate(self, data):
+        # Минимальный CPM зависит от фото канала (+наценка). Пока правка с фото на проверке,
+        # объявление может её получить в любой момент — поэтому берём более строгий минимум
+        if 'cpm' in data or 'show_channel_picture' in data:
+            ad = self.instance
+            pending = ad.pending_revision()
+            proposed = data.get('show_channel_picture',
+                                pending.show_channel_picture if pending else ad.show_channel_picture)
+            if ad.applies_creative_directly(self.context['request'].user):
+                picture = proposed
+            else:
+                picture = ad.show_channel_picture or proposed
+            min_cpm = AdPricing.load().min_cpm(ad.placement, picture)
+            if data.get('cpm', ad.cpm) < min_cpm:
+                raise serializers.ValidationError({'cpm': f"CPM can't be less than {min_cpm}"})
+        return data
+
+    def split(self):
+        """(настройки — применить сразу, креатив — через ревизию)"""
+        data = self.validated_data
+        return ({key: value for key, value in data.items() if key in SETTINGS_FIELDS},
+                {key: value for key, value in data.items() if key in AdRevision.CREATIVE_FIELDS})
 
 
 class AdBudgetTopUpSerializer(serializers.Serializer):

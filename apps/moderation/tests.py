@@ -296,7 +296,12 @@ class ModerationPermissionTests(TestCase):
 
         response = self.client_mod.get('/api/moderation/pending_count/')
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data, {'search_ads': 1, 'chat_ads': 2, 'total': 3})
+        # Старые ключи и их значения — как раньше (total — только старые заказы)
+        self.assertEqual({key: response.data[key] for key in ('search_ads', 'chat_ads', 'total')},
+                         {'search_ads': 1, 'chat_ads': 2, 'total': 3})
+        # Новые очереди объявлений v2 — отдельными ключами
+        self.assertEqual((response.data['ads'], response.data['ad_revisions'], response.data['total_all']),
+                         (0, 0, 3))
 
         # После одобрения счётчик уменьшается
         order = Order.objects.get()

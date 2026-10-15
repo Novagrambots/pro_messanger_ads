@@ -1,7 +1,31 @@
 from django.contrib import admin, messages
 from django.db import transaction
 
-from apps.ads.models import Ad, AdPricing, AdStateError
+from apps.ads.models import Ad, AdDecision, AdPricing, AdRevision, AdStateError
+
+
+class ReadOnlyInline(admin.TabularInline):
+    """Вложенный список только для просмотра"""
+    extra = 0
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+class AdRevisionInline(ReadOnlyInline):
+    model = AdRevision
+    fields = ('created_at', 'status', 'text', 'show_channel_picture', 'other_info', 'reason', 'moderated_by')
+    readonly_fields = fields
+
+
+class AdDecisionInline(ReadOnlyInline):
+    model = AdDecision
+    fields = ('created_at', 'action', 'reason', 'moderator', 'revision')
+    readonly_fields = fields
 
 
 @admin.register(Ad)
@@ -18,6 +42,7 @@ class AdAdmin(admin.ModelAdmin):
     list_select_related = ('user',)
     list_per_page = 30
     actions = ['approve_ads', 'decline_ads', 'block_ads']
+    inlines = [AdRevisionInline, AdDecisionInline]
 
     def has_add_permission(self, request):
         return False
@@ -74,3 +99,25 @@ class AdPricingAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return request.user.is_superuser
+
+
+@admin.register(AdRevision)
+class AdRevisionAdmin(admin.ModelAdmin):
+    """Правки креатива — только просмотр (решения — через API модерации)"""
+    list_display = ('ad', 'status', 'text', 'show_channel_picture', 'created_at', 'moderated_by')
+    list_filter = ('status',)
+    search_fields = ('ad__title', 'text', 'ad__user__username')
+    list_select_related = ('ad', 'moderated_by')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_superuser
+

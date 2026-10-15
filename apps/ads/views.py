@@ -62,17 +62,27 @@ class AdDetailView(generics.GenericAPIView):
     def get(self, request, pk):
         return Response(AdSerializer(self.get_object()).data)
 
-    @extend_schema(request=AdUpdateSerializer, responses={200: AdSerializer, 400: STATE_ERROR_RESPONSE})
+    @extend_schema(request=AdUpdateSerializer, responses={
+        200: AdSerializer,  # всё применено сразу
+        202: AdSerializer,  # креатив ушёл на модерацию — смотри pending_revision
+        400: STATE_ERROR_RESPONSE,
+    })
     def patch(self, request, pk):
-        serializer = AdUpdateSerializer(instance=self.get_object(), data=request.data, partial=True)
+        serializer = AdUpdateSerializer(instance=self.get_object(), data=request.data, partial=True,
+                                        context=self.get_serializer_context())
         serializer.is_valid(raise_exception=True)
+        settings_changes, creative_changes = serializer.split()
+        revision = None
         try:
             with transaction.atomic():
                 ad = get_object_or_404(self.get_queryset().select_for_update(), pk=pk)
-                ad.update_settings(serializer.validated_data)
+                ad.update_settings(settings_changes)
+                if creative_changes:
+                    revision = ad.update_creative(creative_changes, request.user)
         except AdStateError as exc:
             return state_error(exc)
-        return Response(AdSerializer(ad).data)
+        return Response(AdSerializer(ad).data,
+                        status=status.HTTP_202_ACCEPTED if revision else status.HTTP_200_OK)
 
     @extend_schema(responses={200: DELETE_RESPONSE})
     def delete(self, request, pk):

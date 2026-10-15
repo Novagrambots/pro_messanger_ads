@@ -213,12 +213,41 @@ class Ad(models.Model):
         self.moderated_at = timezone.now()
         self.moderation_reason = reason
 
+    def _log_decision(self, moderator, action, reason='', revision=None, notify=True):
+        """Запись в историю решений + уведомление владельцу"""
+        AdDecision.objects.create(ad=self, revision=revision, action=action, reason=reason, moderator=moderator)
+        if notify:
+            # Импорт внутри — иначе циклический импорт ads <-> notifications
+            from apps.notifications.services import notify_ad_decision
+            notify_ad_decision(self, action, reason, revision)
+
+    def submit(self):
+        """
+        Первое сохранение нового объявления (вызывается из колбэка billing.charge).
+        Объявление суперадмина одобряется сразу — он сам себе модератор, как у старых заказов;
+        остальные уходят на модерацию, модераторам — уведомление.
+        """
+        if self.user.is_superuser:
+            self.status = self.initial_status
+            self._set_moderation(self.user, '')
+        else:
+            self.status = AdStatus.IN_REVIEW
+        self.save()
+
+        if self.status == AdStatus.IN_REVIEW:
+            from apps.notifications.services import notify_moderators_new_ad
+            notify_moderators_new_ad(self)
+        else:
+            self._log_decision(self.user, AdDecision.Action.APPROVED,
+                               'Объявление суперадмина одобрено автоматически', notify=False)
+
     def approve(self, moderator):
         """Одобрение: IN_REVIEW → статус, выбранный при создании (ACTIVE или ON_HOLD)"""
         self._require(AdStatus.IN_REVIEW, action='одобрить')
         self.status = self.initial_status
         self._set_moderation(moderator, '')
         self.save()
+        self._log_decision(moderator, AdDecision.Action.APPROVED)
 
     def decline(self, moderator, reason):
         """Отказ: IN_REVIEW → DECLINED, весь остаток сразу возвращается. Возвращает сумму возврата"""
@@ -227,6 +256,7 @@ class Ad(models.Model):
         self.status = AdStatus.DECLINED
         self._set_moderation(moderator, reason)
         self.save()
+        self._log_decision(moderator, AdDecision.Action.DECLINED, reason)
         return refund_amount
 
     def block(self, moderator, reason):
@@ -237,6 +267,8 @@ class Ad(models.Model):
         self.status = AdStatus.BLOCKED
         self._set_moderation(moderator, reason)
         self.save()
+        self._supersede_pending_revision()
+        self._log_decision(moderator, AdDecision.Action.BLOCKED, reason)
         return refund_amount
 
     def stop(self):
@@ -266,11 +298,55 @@ class Ad(models.Model):
         refund_amount = refund(self, MoneyOperation.Reason.DELETE)
         self.status = AdStatus.DELETED
         self.save(update_fields=['status', 'updated_at'])
+        self._supersede_pending_revision()
         return refund_amount
+
+    # ===================== Креатив и ревизии (только под select_for_update) =====================
+
+    def pending_revision(self):
+        return self.revisions.filter(status=AdRevision.Status.PENDING).first()
+
+    def last_declined_revision(self):
+        """Последняя ревизия, если её отклонили (после новой правки или одобрения — None)"""
+        last = self.revisions.order_by('-created_at').first()
+        return last if last and last.status == AdRevision.Status.DECLINED else None
+
+    def _supersede_pending_revision(self):
+        self.revisions.filter(status=AdRevision.Status.PENDING).update(status=AdRevision.Status.SUPERSEDED)
+
+    def applies_creative_directly(self, author):
+        """Правка креатива без ревизии: объявление и так на проверке или правит суперадмин"""
+        return self.status == AdStatus.IN_REVIEW or author.is_superuser
+
+    def update_creative(self, changes, author):
+        """
+        Правка креатива (text, show_channel_picture, other_info) — значения уже проверил сериализатор.
+        Возвращает новую ревизию на проверке или None, если правка применена сразу.
+        Пока ревизия на проверке, объявление крутится в прежнем виде (как у Telegram).
+        """
+        if self.status in (AdStatus.DECLINED, AdStatus.BLOCKED, AdStatus.DELETED):
+            raise AdStateError(f'Объявление в статусе «{self.get_status_display()}» менять нельзя')
+
+        if self.applies_creative_directly(author):
+            for field, value in changes.items():
+                setattr(self, field, value)
+            self.save(update_fields=[*changes, 'updated_at'])
+            return None
+
+        # На проверке всегда одна ревизия: новая правка собирается поверх висящей и заменяет её
+        pending = self.pending_revision()
+        base = pending or self
+        values = {field: changes.get(field, getattr(base, field)) for field in AdRevision.CREATIVE_FIELDS}
+        self._supersede_pending_revision()
+        revision = AdRevision.objects.create(ad=self, **values)
+
+        from apps.notifications.services import notify_moderators_new_revision
+        notify_moderators_new_revision(revision)
+        return revision
 
     def update_settings(self, changes):
         """
-        Правка владельцем без модерации: cpm, daily_limit, views_per_user_per_day,
+        Правка владельцем без модерации: title, cpm, daily_limit, views_per_user_per_day,
         status (ACTIVE ↔ ON_HOLD), даты, расписание. Значения уже проверил сериализатор,
         здесь — правила, зависящие от статуса.
         """
@@ -283,7 +359,8 @@ class Ad(models.Model):
             if self.status == AdStatus.ACTIVE:
                 self.start_date = None  # дата старта имеет смысл только на паузе
 
-        for field in ('cpm', 'daily_limit', 'views_per_user_per_day', 'start_date', 'end_date', 'schedule'):
+        for field in ('title', 'cpm', 'daily_limit', 'views_per_user_per_day', 'start_date', 'end_date',
+                      'schedule'):
             if field in changes:
                 setattr(self, field, changes[field])
 
@@ -333,3 +410,116 @@ class Ad(models.Model):
                 with transaction.atomic():
                     ad = cls.objects.select_for_update().get(pk=pk)
                     getattr(ad, method)(now)
+
+
+class AdRevision(models.Model):
+    """
+    Правка креатива объявления, ждущая модератора. Пока ревизия на проверке, объявление
+    крутится в прежнем виде; одобрили — поля переносятся в объявление (статус не меняется).
+    Деньги ревизии не двигают. На проверке у объявления всегда не больше одной ревизии.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'На проверке'
+        APPROVED = 'APPROVED', 'Одобрена'
+        DECLINED = 'DECLINED', 'Отклонена'
+        SUPERSEDED = 'SUPERSEDED', 'Заменена'  # пришла новая правка, объявление заблокировали или удалили
+
+    # Поля креатива, которые меняются через ревизию (медиа добавит этап 6)
+    CREATIVE_FIELDS = ('text', 'show_channel_picture', 'other_info')
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ad = models.ForeignKey(Ad, on_delete=models.CASCADE, related_name='revisions', verbose_name='Объявление')
+
+    # Полный снимок креатива после правки
+    text = models.CharField('Текст', max_length=160, blank=True, default='')
+    show_channel_picture = models.BooleanField('Показывать фото канала', default=False)
+    other_info = models.CharField('Другая информация', max_length=255, blank=True, default='')
+    # Этап 6: здесь будет медиа (фото / видео) — тоже через ревизию
+
+    status = models.CharField('Статус', max_length=12, choices=Status.choices,
+                              default=Status.PENDING, db_index=True)
+    reason = models.CharField('Причина отказа', max_length=500, blank=True, default='')
+    moderated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+                                     blank=True, related_name='+', verbose_name='Кто модерировал')
+    moderated_at = models.DateTimeField('Когда модерировали', null=True, blank=True)
+    created_at = models.DateTimeField('Создана', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Правка объявления'
+        verbose_name_plural = 'Правки объявлений'
+        ordering = ['-created_at']
+        constraints = [
+            # База сама не даст двум правкам одного объявления одновременно висеть на проверке
+            models.UniqueConstraint(fields=['ad'], condition=Q(status='PENDING'), name='ad_one_pending_revision'),
+        ]
+
+    def __str__(self):
+        return f'Правка «{self.ad.title}» ({self.get_status_display()})'
+
+    @classmethod
+    def lock_with_ad(cls, pk):
+        """
+        Лочит объявление, потом ревизию — в том же порядке, что и PATCH владельца
+        (иначе одобрение и новая правка могли бы заблокировать друг друга).
+        """
+        ad_id = cls.objects.values_list('ad_id', flat=True).get(pk=pk)
+        ad = Ad.objects.select_for_update().get(pk=ad_id)
+        return ad, cls.objects.select_for_update().get(pk=pk)
+
+    def _check_pending(self, ad, action):
+        if self.status != self.Status.PENDING:
+            raise AdStateError(f'Нельзя {action}: правка уже не на проверке ({self.get_status_display()})')
+        if ad.status in (AdStatus.DECLINED, AdStatus.BLOCKED, AdStatus.DELETED):
+            raise AdStateError(f'Нельзя {action}: объявление в статусе «{ad.get_status_display()}»')
+
+    def _set_moderation(self, status, moderator, reason=''):
+        self.status = status
+        self.moderated_by = moderator
+        self.moderated_at = timezone.now()
+        self.reason = reason
+        self.save(update_fields=['status', 'moderated_by', 'moderated_at', 'reason'])
+
+    def approve(self, ad, moderator):
+        """Переносит креатив в объявление (ad — взят под локом через lock_with_ad). Статус объявления тот же"""
+        self._check_pending(ad, 'одобрить')
+        for field in self.CREATIVE_FIELDS:
+            setattr(ad, field, getattr(self, field))
+        ad.save(update_fields=[*self.CREATIVE_FIELDS, 'updated_at'])
+        self._set_moderation(self.Status.APPROVED, moderator)
+        ad._log_decision(moderator, AdDecision.Action.REVISION_APPROVED, revision=self)
+
+    def decline(self, ad, moderator, reason):
+        """Отказ: объявление остаётся в прежнем виде"""
+        self._check_pending(ad, 'отклонить')
+        self._set_moderation(self.Status.DECLINED, moderator, reason)
+        ad._log_decision(moderator, AdDecision.Action.REVISION_DECLINED, reason, revision=self)
+
+
+class AdDecision(models.Model):
+    """История решений модерации по объявлению и его правкам (для карточки модератора)"""
+
+    class Action(models.TextChoices):
+        APPROVED = 'APPROVED', 'Объявление одобрено'
+        DECLINED = 'DECLINED', 'Объявление отклонено'
+        BLOCKED = 'BLOCKED', 'Объявление заблокировано'
+        REVISION_APPROVED = 'REVISION_APPROVED', 'Правка одобрена'
+        REVISION_DECLINED = 'REVISION_DECLINED', 'Правка отклонена'
+
+    ad = models.ForeignKey(Ad, on_delete=models.CASCADE, related_name='decisions', verbose_name='Объявление')
+    revision = models.ForeignKey(AdRevision, on_delete=models.SET_NULL, null=True, blank=True,
+                                 related_name='decisions', verbose_name='Правка')
+    action = models.CharField('Решение', max_length=20, choices=Action.choices)
+    reason = models.CharField('Причина', max_length=500, blank=True, default='')
+    moderator = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+                                  blank=True, related_name='+', verbose_name='Модератор')
+    created_at = models.DateTimeField('Когда', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Решение модерации'
+        verbose_name_plural = 'Решения модерации'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.get_action_display()} — {self.ad.title}'
+

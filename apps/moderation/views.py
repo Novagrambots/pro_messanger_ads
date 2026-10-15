@@ -5,6 +5,7 @@ from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.ads.models import Ad, AdRevision, AdStatus
 from apps.billing.services import format_money
 from apps.common.models import ModerationStatus
 from apps.common.pagination import StandardResultsSetPagination
@@ -116,17 +117,26 @@ class PendingCountView(APIView):
             "properties": {
                 "search_ads": {"type": "integer"},
                 "chat_ads": {"type": "integer"},
-                "total": {"type": "integer"},
+                "total": {"type": "integer", "description": "Только старые заказы (search_ads + chat_ads)"},
+                "ads": {"type": "integer", "description": "Объявления v2 на модерации"},
+                "ad_revisions": {"type": "integer", "description": "Правки креатива на проверке"},
+                "total_all": {"type": "integer", "description": "Все очереди, включая ads и ad_revisions"},
             }
         }
     })
     def get(self, request):
         search_count = Order.objects.filter(status=ModerationStatus.PENDING, cancelled=False).count()
         chat_count = ChatAdOrder.objects.filter(status=ModerationStatus.PENDING, cancelled=False).count()
+        ads_count = Ad.objects.filter(status=AdStatus.IN_REVIEW).count()
+        revisions_count = AdRevision.objects.filter(status=AdRevision.Status.PENDING).count()
         return Response({
             'search_ads': search_count,
             'chat_ads': chat_count,
+            # total не трогаем: действующая админ-панель видит только старые заказы
             'total': search_count + chat_count,
+            'ads': ads_count,
+            'ad_revisions': revisions_count,
+            'total_all': search_count + chat_count + ads_count + revisions_count,
         }, status=status.HTTP_200_OK)
 
 

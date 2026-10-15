@@ -229,6 +229,7 @@ SPECTACULAR_SETTINGS = {
         # Поле status есть у старых заказов, объявлений v2 и журнала денег — разные наборы значений
         'AdStatusEnum': 'apps.ads.models.AdStatus',
         'AdInitialStatusEnum': 'apps.ads.models.InitialStatus',
+        'AdRevisionStatusEnum': 'apps.ads.models.AdRevision.Status',
         'MoneyOperationStatusEnum': 'apps.billing.models.MoneyOperation.Status',
         'StatusEnum': 'apps.common.models.ModerationStatus',  # старое имя у старых заказов — не меняем
     },

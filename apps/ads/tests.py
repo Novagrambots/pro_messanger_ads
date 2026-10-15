@@ -405,10 +405,10 @@ class AdTransitionTests(TestCase):
         self.assertTrue(Op.objects.filter(order_id=ad.pk, reason=Op.Reason.TOP_UP).exists())
 
     def test_patch_immutable_fields(self, _push):
+        # Креатив и title с этапа 4 меняются (см. apps/moderation/test_ads.py) — здесь только неизменяемое
         ad = self.new_ad()
-        for field, value in (('targeting', {'bots': []}), ('placement', 'SEARCH'), ('text', 'новый'),
-                             ('url', 't.me/daryo'), ('title', 'новое'), ('show_channel_picture', True),
-                             ('other_info', 'x'), ('budget', '1'), ('spent', '0')):
+        for field, value in (('targeting', {'bots': []}), ('placement', 'SEARCH'), ('url', 't.me/daryo'),
+                             ('budget', '1'), ('spent', '0')):
             with self.subTest(field=field):
                 response = self.patch(ad, {field: value})
                 self.assertEqual(response.status_code, 400)

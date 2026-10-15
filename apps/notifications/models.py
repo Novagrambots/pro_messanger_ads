@@ -41,13 +41,18 @@ class Notification(models.Model):
         ORDER_REJECTED = 'ORDER_REJECTED', 'Заказ отклонён'
         ORDER_BLOCKED = 'ORDER_BLOCKED', 'Заказ заблокирован'
         MONEY_ALERT = 'MONEY_ALERT', 'Проблема с платежом'
+        # Правки креатива объявлений v2 (сами объявления идут старыми типами с order_type='ads')
+        NEW_REVISION = 'NEW_REVISION', 'Правка объявления на проверку'
+        REVISION_APPROVED = 'REVISION_APPROVED', 'Правка объявления одобрена'
+        REVISION_DECLINED = 'REVISION_DECLINED', 'Правка объявления отклонена'
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                              related_name='notifications', verbose_name='Кому')
     title = models.CharField(verbose_name='Заголовок', max_length=255)
     body = models.CharField(verbose_name='Текст', max_length=1000)
     type = models.CharField(verbose_name='Тип', max_length=20, choices=Type.choices)
-    # {'order_id': ..., 'order_type': 'search_ads'|'chat_ads'} — клиент по тапу открывает нужный экран
+    # {'order_id': ..., 'order_type': 'search_ads'|'chat_ads'|'ads'} (+ 'revision_id' у правок) —
+    # клиент по тапу открывает нужный экран
     payload = models.JSONField(verbose_name='Данные для клиента', default=dict, blank=True)
     is_read = models.BooleanField(verbose_name='Прочитано', default=False)
     created_at = models.DateTimeField(auto_now_add=True)
