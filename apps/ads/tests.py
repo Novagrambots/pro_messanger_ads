@@ -18,6 +18,7 @@ from apps.ads.validators import (ERR_CHANNELS_WITH_LANGUAGES, ERR_CHANNELS_WITH_
                                  ERR_TOPICS_WITHOUT_LANGUAGE)
 from apps.billing.adgram_client import OperationResult
 from apps.billing.models import Balance, MoneyOperation as Op
+from apps.directories.models import TelegramPeer
 
 User = get_user_model()
 
@@ -46,7 +47,38 @@ def client_for(user):
     return client
 
 
+# Каналы и боты из тестов — сразу «свежие» в кэше TelegramPeer, чтобы тесты не ходили в Telegram
+KUNUZ_ID, DARYO_ID = -1001000000001, -1001000000002
+TEST_PEERS = {
+    'kunuz': (TelegramPeer.PeerType.CHANNEL, KUNUZ_ID),
+    'daryo': (TelegramPeer.PeerType.CHANNEL, DARYO_ID),
+    'weatherbot': (TelegramPeer.PeerType.BOT, None),
+}
+SPORTS = 45  # id темы «Sports» в справочнике (как у Telegram)
+
+
+def ensure_test_peers():
+    for username, (peer_type, telegram_id) in TEST_PEERS.items():
+        TelegramPeer.objects.update_or_create(username=username, defaults={
+            'peer_type': peer_type, 'telegram_id': telegram_id, 'title': username,
+            'fetched_at': timezone.now(), 'not_found': False,
+        })
+
+
+_no_network = patch('apps.directories.telegram.requests.get',
+                    side_effect=AssertionError('Тест полез в Telegram — добавьте имя в TEST_PEERS'))
+
+
+def setUpModule():
+    _no_network.start()  # страховка: любой поход в сеть из этих тестов — сразу ошибка
+
+
+def tearDownModule():
+    _no_network.stop()
+
+
 def ad_payload(placement=Placement.BOT, **overrides):
+    ensure_test_peers()
     payload = {
         'placement': placement, 'title': 'Тест', 'url': 'https://t.me/kunuz',
         'cpm': 1000, 'budget': '10000', 'agree_terms': True, 'targeting': TARGETING[placement],
@@ -165,7 +197,7 @@ class AdCreateTests(TestCase):
         self.assertEqual(targeting['countries'], ['UZ'])
         self.assertEqual(targeting['devices'], ['ios', 'android'])
         self.assertEqual(targeting['languages'], ['uz', 'ru'])
-        self.assertEqual(targeting['channel_audiences'], ['kunuz'])
+        self.assertEqual(targeting['channel_audiences'], [{'username': 'kunuz', 'id': KUNUZ_ID}])
         self.assertEqual(targeting['politics'], 'exclude')
 
     def test_channel_message_rules(self):
@@ -173,8 +205,8 @@ class AdCreateTests(TestCase):
         placement = Placement.CHANNEL_MESSAGE
         for targeting, field, message in (
             ({'channels': ['daryo'], 'languages': ['uz']}, 'languages', ERR_CHANNELS_WITH_LANGUAGES),
-            ({'channels': ['daryo'], 'topics': ['Sports']}, 'topics', ERR_CHANNELS_WITH_TOPICS),
-            ({'topics': ['Sports']}, 'languages', ERR_TOPICS_WITHOUT_LANGUAGE),
+            ({'channels': ['daryo'], 'topics': [SPORTS]}, 'topics', ERR_CHANNELS_WITH_TOPICS),
+            ({'topics': [SPORTS]}, 'languages', ERR_TOPICS_WITHOUT_LANGUAGE),
         ):
             with self.subTest(targeting=targeting):
                 response = create_ad(self.client, placement, targeting=targeting)
@@ -188,10 +220,10 @@ class AdCreateTests(TestCase):
         # Продвигаемый канал сам попадает в исключения
         by_channels = create_ad(self.client, placement, targeting={'channels': ['daryo', 'kunuz']})
         self.assertEqual(by_channels.status_code, 201, by_channels.data)
-        self.assertEqual(by_channels.data['targeting']['exclude_channels'], ['kunuz'])
-        by_topics = create_ad(self.client, placement, targeting={'languages': ['uz'], 'topics': ['Sports']})
+        self.assertEqual(by_channels.data['targeting']['exclude_channels'], [{'username': 'kunuz', 'id': KUNUZ_ID}])
+        by_topics = create_ad(self.client, placement, targeting={'languages': ['uz'], 'topics': [SPORTS]})
         self.assertEqual(by_topics.status_code, 201, by_topics.data)
-        self.assertEqual(by_topics.data['targeting']['exclude_channels'], ['kunuz'])
+        self.assertEqual(by_topics.data['targeting']['exclude_channels'], [{'username': 'kunuz', 'id': KUNUZ_ID}])
 
     def test_min_cpm_with_and_without_markup(self):
         response = create_ad(self.client, cpm=999)

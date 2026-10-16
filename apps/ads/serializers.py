@@ -9,6 +9,8 @@ from apps.ads.models import (Ad, AdPricing, AdRevision, AdStateError, InitialSta
                             default_schedule)
 from apps.billing.models import MoneyOperation
 from apps.billing.services import charge, check_budget, format_money
+from apps.directories.serializers import TelegramPeerSerializer
+from apps.directories.telegram import PeerBatch
 
 
 @extend_schema_field({'type': 'string', 'format': 'decimal', 'example': '10000.00'})
@@ -40,6 +42,7 @@ class AdSerializer(serializers.ModelSerializer):
     spent = MoneyField()
     refunded = MoneyField()
     remaining_budget = MoneyField(help_text='Остаток: budget − spent − refunded')
+    promoted_peer = TelegramPeerSerializer(read_only=True, help_text='Продвигаемый канал или бот (для превью)')
     pending_revision = serializers.SerializerMethodField(
         help_text='Правка креатива на проверке (пока её не одобрят, крутится прежний вариант)')
     last_declined_revision = serializers.SerializerMethodField(
@@ -48,7 +51,8 @@ class AdSerializer(serializers.ModelSerializer):
     class Meta:
         model = Ad
         fields = [
-            'id', 'placement', 'ad_format', 'title', 'text', 'url', 'show_channel_picture', 'other_info',
+            'id', 'placement', 'ad_format', 'title', 'text', 'url', 'promoted_peer', 'show_channel_picture',
+            'other_info',
             'cpm', 'budget', 'spent', 'refunded', 'remaining_budget', 'daily_limit', 'views_per_user_per_day',
             'status', 'initial_status', 'start_date', 'end_date', 'schedule', 'targeting',
             'moderation_reason', 'pending_revision', 'last_declined_revision',
@@ -117,14 +121,21 @@ class AdCreateSerializer(serializers.Serializer):
                 errors[field] = exc.detail
 
         data['text'] = check('text', lambda: validators.check_text(placement, data['text']))
+        # Каналы и боты проверяем в Telegram: свежие — из кэша, новые — по очереди, с общим лимитом
+        # времени (20 с) и числа новых имён (20) на весь запрос — и для ссылки, и для таргетинга
+        batch = PeerBatch()
         username = check('url', lambda: validators.parse_promoted_url(data['url']))
+        promoted_peer = None
         if username:
             data['url'] = validators.promoted_url(username)
+            promoted_peer = check('url', lambda: validators.check_promoted_peer(username, batch.resolve))
+        data['promoted_peer'] = promoted_peer
         if placement == Placement.SEARCH and data['show_channel_picture']:
             errors['show_channel_picture'] = 'В рекламе в поиске фото канала нет'
         data['schedule'] = check('schedule', lambda: validators.check_schedule(placement, data['schedule']))
         data['targeting'] = check(
-            'targeting', lambda: validators.validate_targeting(placement, data['targeting'], username))
+            'targeting', lambda: validators.validate_targeting(placement, data['targeting'], promoted_peer,
+                                                               batch.resolve))
 
         min_cpm = pricing.min_cpm(placement, data['show_channel_picture'])
         if data['cpm'] < min_cpm:

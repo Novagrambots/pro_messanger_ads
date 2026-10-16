@@ -134,6 +134,10 @@ class Ad(models.Model):
     url = models.CharField('Ссылка t.me', max_length=64, help_text='https://t.me/<username>')
     show_channel_picture = models.BooleanField('Показывать фото канала', default=False)
     other_info = models.CharField('Другая информация', max_length=255, blank=True, default='')
+    # Что продвигаем (канал или бот) — данные из Telegram для превью и текста кнопки.
+    # Пусто только у объявлений, созданных до этапа 5а
+    promoted_peer = models.ForeignKey('directories.TelegramPeer', on_delete=models.PROTECT, null=True, blank=True,
+                                      related_name='promoted_ads', verbose_name='Продвигаемый канал / бот')
 
     # Деньги и ставка
     cpm = models.PositiveIntegerField('CPM, сум', help_text='Цена 1000 показов, целые сумы')

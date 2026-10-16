@@ -1,0 +1,248 @@
+[
+ {
+  "id": 1,
+  "name_en": "Art & Design",
+  "name_ru": "Искусство и дизайн",
+  "name_uz": "Sanʼat va dizayn"
+ },
+ {
+  "id": 2,
+  "name_en": "Bets & Gambling",
+  "name_ru": "Ставки и азартные игры",
+  "name_uz": "Tikish va qimor oʻyinlari"
+ },
+ {
+  "id": 3,
+  "name_en": "Books",
+  "name_ru": "Книги",
+  "name_uz": "Kitoblar"
+ },
+ {
+  "id": 4,
+  "name_en": "Business & Entrepreneurship",
+  "name_ru": "Бизнес и предпринимательство",
+  "name_uz": "Biznes va tadbirkorlik"
+ },
+ {
+  "id": 5,
+  "name_en": "Cars & Other Vehicles",
+  "name_ru": "Автомобили и другой транспорт",
+  "name_uz": "Avtomobillar va boshqa transport"
+ },
+ {
+  "id": 6,
+  "name_en": "Celebrities & Lifestyle",
+  "name_ru": "Знаменитости и образ жизни",
+  "name_uz": "Mashhurlar va turmush tarzi"
+ },
+ {
+  "id": 7,
+  "name_en": "Cryptocurrencies",
+  "name_ru": "Криптовалюты",
+  "name_uz": "Kriptovalyutalar"
+ },
+ {
+  "id": 8,
+  "name_en": "Culture & Events",
+  "name_ru": "Культура и события",
+  "name_uz": "Madaniyat va tadbirlar"
+ },
+ {
+  "id": 9,
+  "name_en": "Curious Facts",
+  "name_ru": "Интересные факты",
+  "name_uz": "Qiziqarli faktlar"
+ },
+ {
+  "id": 10,
+  "name_en": "Directories of Channels & Bots",
+  "name_ru": "Каталоги каналов и ботов",
+  "name_uz": "Kanal va botlar katalogi"
+ },
+ {
+  "id": 12,
+  "name_en": "Economy & Finance",
+  "name_ru": "Экономика и финансы",
+  "name_uz": "Iqtisodiyot va moliya"
+ },
+ {
+  "id": 13,
+  "name_en": "Education",
+  "name_ru": "Образование",
+  "name_uz": "Taʼlim"
+ },
+ {
+  "id": 15,
+  "name_en": "Fashion & Beauty",
+  "name_ru": "Мода и красота",
+  "name_uz": "Moda va goʻzallik"
+ },
+ {
+  "id": 16,
+  "name_en": "Fitness",
+  "name_ru": "Фитнес",
+  "name_uz": "Fitnes"
+ },
+ {
+  "id": 18,
+  "name_en": "Food & Cooking",
+  "name_ru": "Еда и кулинария",
+  "name_uz": "Taom va pazandachilik"
+ },
+ {
+  "id": 19,
+  "name_en": "Foreign Language Learning",
+  "name_ru": "Изучение иностранных языков",
+  "name_uz": "Chet tillarini oʻrganish"
+ },
+ {
+  "id": 21,
+  "name_en": "Health & Medicine",
+  "name_ru": "Здоровье и медицина",
+  "name_uz": "Salomatlik va tibbiyot"
+ },
+ {
+  "id": 22,
+  "name_en": "History",
+  "name_ru": "История",
+  "name_uz": "Tarix"
+ },
+ {
+  "id": 23,
+  "name_en": "Hobbies & Activities",
+  "name_ru": "Хобби и увлечения",
+  "name_uz": "Xobbi va mashgʻulotlar"
+ },
+ {
+  "id": 24,
+  "name_en": "Home & Architecture",
+  "name_ru": "Дом и архитектура",
+  "name_uz": "Uy va arxitektura"
+ },
+ {
+  "id": 25,
+  "name_en": "Humor & Memes",
+  "name_ru": "Юмор и мемы",
+  "name_uz": "Hazil va memlar"
+ },
+ {
+  "id": 26,
+  "name_en": "Investments",
+  "name_ru": "Инвестиции",
+  "name_uz": "Investitsiyalar"
+ },
+ {
+  "id": 27,
+  "name_en": "Job Listings",
+  "name_ru": "Вакансии",
+  "name_uz": "Boʻsh ish oʻrinlari"
+ },
+ {
+  "id": 28,
+  "name_en": "Kids & Parenting",
+  "name_ru": "Дети и воспитание",
+  "name_uz": "Bolalar va tarbiya"
+ },
+ {
+  "id": 29,
+  "name_en": "Marketing & PR",
+  "name_ru": "Маркетинг и PR",
+  "name_uz": "Marketing va PR"
+ },
+ {
+  "id": 30,
+  "name_en": "Motivation & Self-development",
+  "name_ru": "Мотивация и саморазвитие",
+  "name_uz": "Motivatsiya va oʻz ustida ishlash"
+ },
+ {
+  "id": 31,
+  "name_en": "Movies",
+  "name_ru": "Кино",
+  "name_uz": "Kino"
+ },
+ {
+  "id": 32,
+  "name_en": "Music",
+  "name_ru": "Музыка",
+  "name_uz": "Musiqa"
+ },
+ {
+  "id": 33,
+  "name_en": "Offers & Promotions",
+  "name_ru": "Скидки и акции",
+  "name_uz": "Chegirmalar va aksiyalar"
+ },
+ {
+  "id": 35,
+  "name_en": "Pets",
+  "name_ru": "Домашние животные",
+  "name_uz": "Uy hayvonlari"
+ },
+ {
+  "id": 37,
+  "name_en": "Politics & Incidents",
+  "name_ru": "Политика и происшествия",
+  "name_uz": "Siyosat va hodisalar"
+ },
+ {
+  "id": 39,
+  "name_en": "Psychology & Relationships",
+  "name_ru": "Психология и отношения",
+  "name_uz": "Psixologiya va munosabatlar"
+ },
+ {
+  "id": 40,
+  "name_en": "Real Estate",
+  "name_ru": "Недвижимость",
+  "name_uz": "Koʻchmas mulk"
+ },
+ {
+  "id": 41,
+  "name_en": "Recreation & Entertainment",
+  "name_ru": "Отдых и развлечения",
+  "name_uz": "Dam olish va koʻngilochar"
+ },
+ {
+  "id": 42,
+  "name_en": "Religion & Spirituality",
+  "name_ru": "Религия и духовность",
+  "name_uz": "Din va maʼnaviyat"
+ },
+ {
+  "id": 43,
+  "name_en": "Science",
+  "name_ru": "Наука",
+  "name_uz": "Fan"
+ },
+ {
+  "id": 45,
+  "name_en": "Sports",
+  "name_ru": "Спорт",
+  "name_uz": "Sport"
+ },
+ {
+  "id": 46,
+  "name_en": "Technology & Internet",
+  "name_ru": "Технологии и интернет",
+  "name_uz": "Texnologiyalar va internet"
+ },
+ {
+  "id": 47,
+  "name_en": "Travel & Tourism",
+  "name_ru": "Путешествия и туризм",
+  "name_uz": "Sayohat va turizm"
+ },
+ {
+  "id": 48,
+  "name_en": "Video Games",
+  "name_ru": "Видеоигры",
+  "name_uz": "Video oʻyinlar"
+ },
+ {
+  "id": 63,
+  "name_en": "Other",
+  "name_ru": "Другое",
+  "name_uz": "Boshqa"
+ }
+]

@@ -60,6 +60,7 @@ INSTALLED_APPS = [
     'apps.moderation',
     'apps.announcements',
     'apps.notifications',
+    'apps.directories',
     'apps.ads',
 ]
 
@@ -192,6 +193,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'anon': '500/minute',  # ограничения для анонимных пользователей
         'user': '500/minute',  # ограничения для авторизованных пользователей
+        'tg_resolve': '60/minute',  # данные канала/бота по t.me-ссылке (ходит в Telegram)
     }
 }
 
@@ -207,6 +209,19 @@ SIMPLE_JWT = {
 # Пусто → вход по токенам AdGram выключен. Должен отличаться от SECRET_KEY
 # (иначе ломается свой логин) — это проверяется при старте в apps/account/apps.py.
 ADGRAM_JWT_SECRET = os.getenv('ADGRAM_JWT_SECRET', '')
+
+# Общий кэш Django (справочники, троттлинг): в docker — Redis, база 1 (база 0 занята Celery).
+# Без переменной — память процесса (локально и в тестах). Нужен общий: правка справочника
+# в админке должна сбросить кэш сразу у всех воркеров gunicorn
+CACHE_REDIS_URL = os.getenv('CACHE_REDIS_URL', '')
+if CACHE_REDIS_URL:
+    CACHES = {'default': {'BACKEND': 'django.core.cache.backends.redis.RedisCache', 'LOCATION': CACHE_REDIS_URL}}
+else:
+    CACHES = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
+
+# Токен бота для Bot API getChat: числовой id и точный тип канала по t.me-имени.
+# Без него данные берутся только со страницы t.me — и у каналов не будет числового id
+TELEGRAM_RESOLVER_BOT_TOKEN = os.getenv('TELEGRAM_RESOLVER_BOT_TOKEN', '')
 
 # Общий баланс с AdGram: внутреннее API AdGram (заголовок X-Internal-Key).
 # Не заданы → юзеры AdGram не могут создавать заказы (503), а возвраты копятся

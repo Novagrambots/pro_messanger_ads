@@ -46,7 +46,7 @@ class AdListCreateView(generics.ListCreateAPIView):
         serializer = AdCreateSerializer(data=request.data, context=self.get_serializer_context())
         serializer.is_valid(raise_exception=True)
         ad = serializer.save()
-        return Response(AdSerializer(ad).data, status=status.HTTP_201_CREATED)
+        return Response(AdSerializer(ad, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
 
 class AdDetailView(generics.GenericAPIView):
@@ -60,7 +60,7 @@ class AdDetailView(generics.GenericAPIView):
         return own_ads(self.request.user)
 
     def get(self, request, pk):
-        return Response(AdSerializer(self.get_object()).data)
+        return Response(AdSerializer(self.get_object(), context={'request': request}).data)
 
     @extend_schema(request=AdUpdateSerializer, responses={
         200: AdSerializer,  # всё применено сразу
@@ -81,7 +81,7 @@ class AdDetailView(generics.GenericAPIView):
                     revision = ad.update_creative(creative_changes, request.user)
         except AdStateError as exc:
             return state_error(exc)
-        return Response(AdSerializer(ad).data,
+        return Response(AdSerializer(ad, context={'request': request}).data,
                         status=status.HTTP_202_ACCEPTED if revision else status.HTTP_200_OK)
 
     @extend_schema(responses={200: DELETE_RESPONSE})
@@ -129,7 +129,7 @@ class AdBudgetTopUpView(generics.GenericAPIView):
             # Статус успел смениться после проверки: у локального кошелька всё откатилось,
             # у AdGram списание без объявления вернёт компенсация (через 10 минут)
             return state_error(exc)
-        return Response(AdSerializer(ad).data)
+        return Response(AdSerializer(ad, context={'request': request}).data)
 
 
 class AdBudgetHistoryView(generics.ListAPIView):

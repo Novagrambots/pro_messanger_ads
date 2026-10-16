@@ -11,7 +11,7 @@ from django.db import IntegrityError, connection, transaction
 from django.test import TestCase, TransactionTestCase
 
 from apps.ads.models import Ad, AdDecision, AdRevision, AdStateError, AdStatus, Placement
-from apps.ads.tests import client_for, create_ad, make_local_user
+from apps.ads.tests import client_for, create_ad, make_local_user, setUpModule, tearDownModule  # noqa: F401
 from apps.billing.models import Balance, MoneyOperation as Op
 from apps.notifications.models import Notification
 

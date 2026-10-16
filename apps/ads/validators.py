@@ -1,9 +1,10 @@
 """
-Проверки объявления v2, которые не зависят от базы: ссылка t.me, текст, расписание, даты
-и таргетинг по месту показа.
+Проверки объявления v2: ссылка t.me, текст, расписание, даты и таргетинг по месту показа.
 
-Каналы и боты пока храним t.me-именами (в id их превратит этап 5). Справочники языков,
-тем и стран тоже подключит этап 5 — сейчас проверяем только формат значений.
+Таргетинг проверяется по справочникам (apps.directories: языки, темы, страны, локации),
+а каналы и боты — через Telegram (apps.directories.telegram): канал должен быть каналом,
+бот — ботом. Каналы храним объектами {username, id} — id нужен выдаче (клиент присылает
+числовой channel_id в формате Bot API / TDLib: -100…), боты — по username.
 """
 import re
 from datetime import timedelta
@@ -15,6 +16,9 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from apps.ads.models import Placement, USERS_PLACEMENTS
+from apps.directories import services as directories
+from apps.directories.models import TelegramPeer
+from apps.directories.telegram import TelegramUnavailable, TooManyUnknown, normalize_username as tg_username
 
 # Устройства NovaGram (пустой список = все устройства).
 # Список ещё согласуем с мобильщиками — менять только здесь
@@ -27,27 +31,41 @@ MAX_QUERIES = 10
 MAX_DATE_AHEAD = timedelta(days=365)
 FULL_DAY_MASK = (1 << 24) - 1  # все 24 часа суток
 
-# Имя в Telegram: латиница, цифры, _, начинается с буквы, 4–32 символа (короткие бывают у купленных имён)
-USERNAME_RE = re.compile(r'[a-z][a-z0-9_]{3,31}')
 TME_LINK_RE = re.compile(r'(?:https?://)?t\.me/([A-Za-z0-9_]+)/?', re.IGNORECASE)
-LANGUAGE_RE = re.compile(r'[a-z]{2,3}')
-COUNTRY_RE = re.compile(r'[A-Z]{2}')
 
 # Тексты ошибок Telegram для таргетинга Каналов (как в форме ads.telegram.org)
 ERR_CHANNELS_WITH_LANGUAGES = 'If specific channels are targeted, the language field must be empty'
 ERR_CHANNELS_WITH_TOPICS = 'If specific channels are targeted, the topic field must be empty'
 ERR_TOPICS_WITHOUT_LANGUAGE = 'You must choose one language when targeting by topic'
+ERR_TOO_MANY_UNKNOWN = 'Слишком много новых каналов за раз (больше 20) — добавьте их по одному'
+ERR_TELEGRAM_DOWN = 'Не удалось проверить в Telegram — он не отвечает, попробуйте ещё раз'
+
+PeerType = TelegramPeer.PeerType
 
 
 # ===================================== Ссылка, текст =====================================
 
 def parse_promoted_url(value):
     """Только t.me/<username> (можно с https://). Возвращает username в нижнем регистре"""
-    match = TME_LINK_RE.fullmatch(value.strip())
-    username = match.group(1).lower() if match else ''
-    if not USERNAME_RE.fullmatch(username):
+    if not TME_LINK_RE.fullmatch(value.strip()):
         raise serializers.ValidationError('Нужна ссылка вида t.me/<username>')
-    return username
+    try:
+        return tg_username(value)
+    except ValueError:
+        raise serializers.ValidationError('Нужна ссылка вида t.me/<username>')
+
+
+def check_promoted_peer(username, resolve_peers):
+    """Продвигать можно канал или бота — проверяем в Telegram. Возвращает TelegramPeer"""
+    try:
+        peer = resolve_peers([username])[username]
+    except TelegramUnavailable:
+        raise serializers.ValidationError(ERR_TELEGRAM_DOWN)
+    if peer.not_found:
+        raise serializers.ValidationError(f'@{username} не найден в Telegram')
+    if peer.peer_type not in (PeerType.CHANNEL, PeerType.BOT):
+        raise serializers.ValidationError(f'@{username} — не канал и не бот')
+    return peer
 
 
 def promoted_url(username):
@@ -141,25 +159,30 @@ def _unique(items, key=lambda item: item):
     return result
 
 
-def normalize_username(value):
-    """t.me/name, https://t.me/name, @name или name → name в нижнем регистре"""
-    if not isinstance(value, str):
-        raise serializers.ValidationError(f'Некорректное имя: {value}')
-    raw = value.strip()
-    match = TME_LINK_RE.fullmatch(raw)
-    name = (match.group(1) if match else raw.removeprefix('@')).lower()
-    if not USERNAME_RE.fullmatch(name):
-        raise serializers.ValidationError(f'Некорректное имя канала или бота: {value}')
-    return name
+def _known(values, allowed, what):
+    """Значение из справочника: неизвестное или выключенное → ошибка с самим значением"""
+    unknown = [str(value) for value in values if value not in allowed]
+    if unknown:
+        raise serializers.ValidationError(f'Неизвестный или выключенный {what}: {", ".join(unknown)}')
+    return values
 
 
-def _channels(value):
-    names = [normalize_username(item) for item in _as_list(value, MAX_CHANNELS, 'каналов')]
+def _usernames(value, max_items, what):
+    names = []
+    for item in _as_list(value, max_items, what):
+        try:
+            names.append(tg_username(item))
+        except ValueError:
+            raise serializers.ValidationError(f'Некорректное имя канала или бота: {item}')
     return _unique(names)
 
 
+def _channels(value):
+    return _usernames(value, MAX_CHANNELS, 'каналов')
+
+
 def _bots(value):
-    names = _unique([normalize_username(item) for item in _as_list(value, MAX_BOTS, 'ботов')])
+    names = _usernames(value, MAX_BOTS, 'ботов')
     for name in names:
         if not name.endswith('bot'):
             raise serializers.ValidationError(f'@{name} — не бот: имя бота кончается на «bot»')
@@ -178,33 +201,39 @@ def _queries(value):
     return queries
 
 
-def _strings(value, regex=None, max_len=64, max_items=100, upper=False, lower=False):
-    result = []
+def _codes(value, max_items, upper=False):
+    codes = []
     for item in _as_list(value, max_items, 'значений'):
-        if not isinstance(item, str) or not item.strip() or len(item.strip()) > max_len:
-            raise serializers.ValidationError(f'Некорректное значение: {item}')
-        item = item.strip()
-        item = item.upper() if upper else item.lower() if lower else item
-        if regex and not regex.fullmatch(item):
+        if not isinstance(item, str) or not item.strip():
             raise serializers.ValidationError(f'Некорректный код: {item}')
-        result.append(item)
-    return _unique(result, key=str.lower)
+        codes.append(item.strip().upper() if upper else item.strip().lower())
+    return _unique(codes)
+
+
+def _ids(value, max_items):
+    """Список целых id (темы, локации). Строка, даже «1», — ошибка"""
+    ids = []
+    for item in _as_list(value, max_items, 'значений'):
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise serializers.ValidationError(f'Нужен числовой id, а пришло: {item!r}')
+        ids.append(item)
+    return _unique(ids)
 
 
 def _languages(value):
-    return _strings(value, regex=LANGUAGE_RE, lower=True)
+    return _known(_codes(value, 100), directories.language_codes(), 'язык')
 
 
 def _countries(value):
-    return _strings(value, regex=COUNTRY_RE, upper=True, max_items=250)
+    return _known(_codes(value, 300, upper=True), directories.country_codes(), 'код страны')
 
 
 def _topics(value):
-    return _strings(value)
+    return _known(_ids(value, 100), directories.topic_ids(), 'id темы')
 
 
 def _locations(value):
-    return _strings(value, max_len=100)
+    return _known(_ids(value, 100), directories.location_countries(), 'id локации')
 
 
 def _devices(value):
@@ -248,12 +277,16 @@ TARGETING_FIELDS = {
     Placement.USERS_VIDEO_BANNER: {**_USERS_FIELDS, 'politics': _politics},
     Placement.USERS_BOT_BANNER: _USERS_FIELDS,  # в баннере в боте галочек про политику нет
 }
+# Поля, где каждое имя должно оказаться каналом (храним {username, id}) или ботом (по username)
+CHANNEL_FIELDS = ('channels', 'exclude_channels', 'channel_audiences', 'exclude_channel_audiences')
+BOT_FIELDS = ('bots',)
 
 
-def validate_targeting(placement, data, promoted_username):
+def validate_targeting(placement, data, promoted_peer, resolve_peers):
     """
-    Строгая проверка таргетинга по месту показа. Возвращает нормализованный словарь
-    (все поля места показа на месте). Ошибки — по полям.
+    Строгая проверка таргетинга по месту показа: формат и лимиты → справочники → каналы
+    и боты через Telegram (resolve_peers(имена) → {имя: TelegramPeer}) → правила места показа.
+    Возвращает нормализованный словарь (все поля места показа на месте). Ошибки — по полям.
     """
     if data is None:
         data = {}
@@ -275,14 +308,48 @@ def validate_targeting(placement, data, promoted_username):
     if errors:
         raise serializers.ValidationError(errors)
 
+    _check_peers(result, resolve_peers)
+
     if placement == Placement.CHANNEL_MESSAGE:
-        _channel_message_rules(result, promoted_username)
-    elif placement in USERS_PLACEMENTS and not result['countries']:
-        raise serializers.ValidationError({'countries': 'Выберите хотя бы одну страну'})
+        _channel_message_rules(result, promoted_peer)
+    elif placement in USERS_PLACEMENTS:
+        _users_rules(result)
     return result
 
 
-def _channel_message_rules(targeting, promoted_username):
+def _check_peers(targeting, resolve_peers):
+    """Каждое имя в полях каналов — канал, в полях ботов — бот. Каналы → {username, id}"""
+    names = [name for key in CHANNEL_FIELDS + BOT_FIELDS for name in targeting.get(key, [])]
+    if not names:
+        return
+    try:
+        peers = resolve_peers(names)
+    except TooManyUnknown:
+        raise serializers.ValidationError(ERR_TOO_MANY_UNKNOWN)
+    except TelegramUnavailable:
+        raise serializers.ValidationError(ERR_TELEGRAM_DOWN)
+
+    errors = {}
+    for key in CHANNEL_FIELDS + BOT_FIELDS:
+        if key not in targeting:
+            continue
+        expected, what = (PeerType.BOT, 'бот') if key in BOT_FIELDS else (PeerType.CHANNEL, 'канал')
+        problems = []
+        for name in targeting[key]:
+            peer = peers[name]
+            if peer.not_found:
+                problems.append(f'@{name} не найден в Telegram')
+            elif peer.peer_type != expected:
+                problems.append(f'@{name} — не {what}')
+        if problems:
+            errors[key] = '; '.join(problems)
+        elif key in CHANNEL_FIELDS:
+            targeting[key] = [{'username': name, 'id': peers[name].telegram_id} for name in targeting[key]]
+    if errors:
+        raise serializers.ValidationError(errors)
+
+
+def _channel_message_rules(targeting, promoted_peer):
     """Правила Telegram: либо языки + темы, либо явный список каналов"""
     errors = {}
     if targeting['channels']:
@@ -297,6 +364,19 @@ def _channel_message_rules(targeting, promoted_username):
     if errors:
         raise serializers.ValidationError(errors)
 
-    # Реклама канала не показывается в нём самом
-    if promoted_username and promoted_username not in targeting['exclude_channels']:
-        targeting['exclude_channels'].append(promoted_username)
+    # Реклама канала не показывается в нём самом (выдача сверяет по id)
+    if promoted_peer and promoted_peer.peer_type == PeerType.CHANNEL:
+        excluded = targeting['exclude_channels']
+        if not any(item['username'] == promoted_peer.username for item in excluded):
+            excluded.append({'username': promoted_peer.username, 'id': promoted_peer.telegram_id})
+
+
+def _users_rules(targeting):
+    if not targeting['countries']:
+        raise serializers.ValidationError({'countries': 'Выберите хотя бы одну страну'})
+    # Локация должна быть в одной из выбранных стран
+    location_countries = directories.location_countries()
+    wrong = [str(location) for location in targeting['locations']
+             if location_countries[location] not in targeting['countries']]
+    if wrong:
+        raise serializers.ValidationError({'locations': f'Локации не из выбранных стран: {", ".join(wrong)}'})

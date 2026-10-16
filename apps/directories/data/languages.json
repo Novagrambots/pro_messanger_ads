@@ -1,0 +1,428 @@
+[
+ {
+  "code": "en",
+  "name_en": "English",
+  "name_ru": "Английский",
+  "name_uz": "Ingliz tili"
+ },
+ {
+  "code": "af",
+  "name_en": "Afrikaans",
+  "name_ru": "Африкаанс",
+  "name_uz": "Afrikaans tili"
+ },
+ {
+  "code": "sq",
+  "name_en": "Albanian",
+  "name_ru": "Албанский",
+  "name_uz": "Alban tili"
+ },
+ {
+  "code": "am",
+  "name_en": "Amharic",
+  "name_ru": "Амхарский",
+  "name_uz": "Amxar tili"
+ },
+ {
+  "code": "ar",
+  "name_en": "Arabic",
+  "name_ru": "Арабский",
+  "name_uz": "Arab tili"
+ },
+ {
+  "code": "hy",
+  "name_en": "Armenian",
+  "name_ru": "Армянский",
+  "name_uz": "Arman tili"
+ },
+ {
+  "code": "az",
+  "name_en": "Azerbaijani",
+  "name_ru": "Азербайджанский",
+  "name_uz": "Ozarbayjon tili"
+ },
+ {
+  "code": "eu",
+  "name_en": "Basque",
+  "name_ru": "Баскский",
+  "name_uz": "Bask tili"
+ },
+ {
+  "code": "be",
+  "name_en": "Belarusian",
+  "name_ru": "Белорусский",
+  "name_uz": "Belarus tili"
+ },
+ {
+  "code": "bn",
+  "name_en": "Bengali",
+  "name_ru": "Бенгальский",
+  "name_uz": "Bengal tili"
+ },
+ {
+  "code": "bg",
+  "name_en": "Bulgarian",
+  "name_ru": "Болгарский",
+  "name_uz": "Bolgar tili"
+ },
+ {
+  "code": "my",
+  "name_en": "Burmese",
+  "name_ru": "Бирманский",
+  "name_uz": "Birma tili"
+ },
+ {
+  "code": "ca",
+  "name_en": "Catalan",
+  "name_ru": "Каталанский",
+  "name_uz": "Katalan tili"
+ },
+ {
+  "code": "zh-hans",
+  "name_en": "Chinese (Simplified)",
+  "name_ru": "Китайский (упрощённый)",
+  "name_uz": "Xitoy tili (soddalashtirilgan)"
+ },
+ {
+  "code": "zh-hant",
+  "name_en": "Chinese (Traditional)",
+  "name_ru": "Китайский (традиционный)",
+  "name_uz": "Xitoy tili (anʼanaviy)"
+ },
+ {
+  "code": "hr",
+  "name_en": "Croatian",
+  "name_ru": "Хорватский",
+  "name_uz": "Xorvat tili"
+ },
+ {
+  "code": "cs",
+  "name_en": "Czech",
+  "name_ru": "Чешский",
+  "name_uz": "Chex tili"
+ },
+ {
+  "code": "da",
+  "name_en": "Danish",
+  "name_ru": "Датский",
+  "name_uz": ""
+ },
+ {
+  "code": "nl",
+  "name_en": "Dutch",
+  "name_ru": "Нидерландский",
+  "name_uz": "Niderland tili"
+ },
+ {
+  "code": "eo",
+  "name_en": "Esperanto",
+  "name_ru": "Эсперанто",
+  "name_uz": "Esperanto tili"
+ },
+ {
+  "code": "et",
+  "name_en": "Estonian",
+  "name_ru": "Эстонский",
+  "name_uz": "Eston tili"
+ },
+ {
+  "code": "fil",
+  "name_en": "Filipino",
+  "name_ru": "Филиппинский",
+  "name_uz": "Filippin tili"
+ },
+ {
+  "code": "fi",
+  "name_en": "Finnish",
+  "name_ru": "Финский",
+  "name_uz": "Fin tili"
+ },
+ {
+  "code": "fr",
+  "name_en": "French",
+  "name_ru": "Французский",
+  "name_uz": "Fransuz tili"
+ },
+ {
+  "code": "gl",
+  "name_en": "Galician",
+  "name_ru": "Галисийский",
+  "name_uz": ""
+ },
+ {
+  "code": "ka",
+  "name_en": "Georgian",
+  "name_ru": "Грузинский",
+  "name_uz": "Gruzin tili"
+ },
+ {
+  "code": "de",
+  "name_en": "German",
+  "name_ru": "Немецкий",
+  "name_uz": "Nemis tili"
+ },
+ {
+  "code": "el",
+  "name_en": "Greek",
+  "name_ru": "Греческий",
+  "name_uz": "Yunon tili"
+ },
+ {
+  "code": "gu",
+  "name_en": "Gujarati",
+  "name_ru": "Гуджарати",
+  "name_uz": "Gujarati tili"
+ },
+ {
+  "code": "he",
+  "name_en": "Hebrew",
+  "name_ru": "Иврит",
+  "name_uz": "Ivrit tili"
+ },
+ {
+  "code": "hi",
+  "name_en": "Hindi",
+  "name_ru": "Хинди",
+  "name_uz": "Hind tili"
+ },
+ {
+  "code": "hu",
+  "name_en": "Hungarian",
+  "name_ru": "Венгерский",
+  "name_uz": "Venger tili"
+ },
+ {
+  "code": "id",
+  "name_en": "Indonesian",
+  "name_ru": "Индонезийский",
+  "name_uz": "Indonez tili"
+ },
+ {
+  "code": "ga",
+  "name_en": "Irish",
+  "name_ru": "Ирландский",
+  "name_uz": "Irland tili"
+ },
+ {
+  "code": "it",
+  "name_en": "Italian",
+  "name_ru": "Итальянский",
+  "name_uz": "Italyan tili"
+ },
+ {
+  "code": "ja",
+  "name_en": "Japanese",
+  "name_ru": "Японский",
+  "name_uz": "Yapon tili"
+ },
+ {
+  "code": "kn",
+  "name_en": "Kannada",
+  "name_ru": "Каннада",
+  "name_uz": "Kannada tili"
+ },
+ {
+  "code": "kk",
+  "name_en": "Kazakh",
+  "name_ru": "Казахский",
+  "name_uz": "Qozoq tili"
+ },
+ {
+  "code": "km",
+  "name_en": "Khmer",
+  "name_ru": "Кхмерский",
+  "name_uz": "Kxmer tili"
+ },
+ {
+  "code": "ko",
+  "name_en": "Korean",
+  "name_ru": "Корейский",
+  "name_uz": "Koreys tili"
+ },
+ {
+  "code": "lv",
+  "name_en": "Latvian",
+  "name_ru": "Латышский",
+  "name_uz": "Latish tili"
+ },
+ {
+  "code": "lt",
+  "name_en": "Lithuanian",
+  "name_ru": "Литовский",
+  "name_uz": "Litva tili"
+ },
+ {
+  "code": "ms",
+  "name_en": "Malay",
+  "name_ru": "Малайский",
+  "name_uz": "Malay tili"
+ },
+ {
+  "code": "ml",
+  "name_en": "Malayalam",
+  "name_ru": "Малаялам",
+  "name_uz": "Malayalam tili"
+ },
+ {
+  "code": "mt",
+  "name_en": "Maltese",
+  "name_ru": "Мальтийский",
+  "name_uz": "Malta tili"
+ },
+ {
+  "code": "mr",
+  "name_en": "Marathi",
+  "name_ru": "Маратхи",
+  "name_uz": "Marathi tili"
+ },
+ {
+  "code": "ne",
+  "name_en": "Nepali",
+  "name_ru": "Непальский",
+  "name_uz": "Nepal tili"
+ },
+ {
+  "code": "nb",
+  "name_en": "Norwegian (Bokmål)",
+  "name_ru": "Норвежский (букмол)",
+  "name_uz": "Norveg tili (bukmol)"
+ },
+ {
+  "code": "or",
+  "name_en": "Odia",
+  "name_ru": "Ория",
+  "name_uz": "Oriya tili"
+ },
+ {
+  "code": "fa",
+  "name_en": "Persian",
+  "name_ru": "Персидский",
+  "name_uz": "Fors tili"
+ },
+ {
+  "code": "pl",
+  "name_en": "Polish",
+  "name_ru": "Польский",
+  "name_uz": "Polyak tili"
+ },
+ {
+  "code": "pt-br",
+  "name_en": "Portuguese (Brazil)",
+  "name_ru": "Португальский (Бразилия)",
+  "name_uz": "Portugal tili (Braziliya)"
+ },
+ {
+  "code": "pt-pt",
+  "name_en": "Portuguese (Portugal)",
+  "name_ru": "Португальский (Португалия)",
+  "name_uz": "Portugal tili (Portugaliya)"
+ },
+ {
+  "code": "ro",
+  "name_en": "Romanian",
+  "name_ru": "Румынский",
+  "name_uz": "Rumin tili"
+ },
+ {
+  "code": "ru",
+  "name_en": "Russian",
+  "name_ru": "Русский",
+  "name_uz": "Rus tili"
+ },
+ {
+  "code": "sr",
+  "name_en": "Serbian",
+  "name_ru": "Сербский",
+  "name_uz": "Serb tili"
+ },
+ {
+  "code": "sk",
+  "name_en": "Slovak",
+  "name_ru": "Словацкий",
+  "name_uz": "Slovak tili"
+ },
+ {
+  "code": "sl",
+  "name_en": "Slovene",
+  "name_ru": "Словенский",
+  "name_uz": "Sloven tili"
+ },
+ {
+  "code": "es",
+  "name_en": "Spanish",
+  "name_ru": "Испанский",
+  "name_uz": "Ispan tili"
+ },
+ {
+  "code": "sw",
+  "name_en": "Swahili",
+  "name_ru": "Суахили",
+  "name_uz": "Suaxili tili"
+ },
+ {
+  "code": "sv",
+  "name_en": "Swedish",
+  "name_ru": "Шведский",
+  "name_uz": "Shved tili"
+ },
+ {
+  "code": "tg",
+  "name_en": "Tajik",
+  "name_ru": "Таджикский",
+  "name_uz": "Tojik tili"
+ },
+ {
+  "code": "ta",
+  "name_en": "Tamil",
+  "name_ru": "Тамильский",
+  "name_uz": "Tamil tili"
+ },
+ {
+  "code": "te",
+  "name_en": "Telugu",
+  "name_ru": "Телугу",
+  "name_uz": "Telugu tili"
+ },
+ {
+  "code": "th",
+  "name_en": "Thai",
+  "name_ru": "Тайский",
+  "name_uz": "Tay tili"
+ },
+ {
+  "code": "tr",
+  "name_en": "Turkish",
+  "name_ru": "Турецкий",
+  "name_uz": "Turk tili"
+ },
+ {
+  "code": "tk",
+  "name_en": "Turkmen",
+  "name_ru": "Туркменский",
+  "name_uz": "Turkman tili"
+ },
+ {
+  "code": "uk",
+  "name_en": "Ukrainian",
+  "name_ru": "Украинский",
+  "name_uz": "Ukrain tili"
+ },
+ {
+  "code": "ur",
+  "name_en": "Urdu",
+  "name_ru": "Урду",
+  "name_uz": "Urdu tili"
+ },
+ {
+  "code": "uz",
+  "name_en": "Uzbek",
+  "name_ru": "Узбекский",
+  "name_uz": "Oʻzbek tili"
+ },
+ {
+  "code": "vi",
+  "name_en": "Vietnamese",
+  "name_ru": "Вьетнамский",
+  "name_uz": "Vyetnam tili"
+ }
+]
