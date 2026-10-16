@@ -7,7 +7,9 @@ from rest_framework.views import APIView
 from apps.common.schema import ERROR_RESPONSE
 from apps.directories import services
 from apps.directories.serializers import (CountrySerializer, LanguageSerializer, LocationSerializer,
-                                          TelegramPeerSerializer, TopicSerializer)
+                                          SimilarBotSerializer, SimilarChannelSerializer, TelegramPeerSerializer,
+                                          TopicSerializer)
+from apps.directories.similar import SimilarUnavailable, find_similar, parse_usernames
 from apps.directories.telegram import TelegramUnavailable, normalize_username, resolve
 
 
@@ -80,3 +82,55 @@ class TelegramResolveView(APIView):
         if peer.not_found:
             return Response({'error': f'@{username} не найден в Telegram'}, status=status.HTTP_404_NOT_FOUND)
         return Response(TelegramPeerSerializer(peer, context={'request': request}).data)
+
+
+class SimilarThrottle(UserRateThrottle):
+    scope = 'tg_similar'  # 20 в минуту на пользователя (settings.DEFAULT_THROTTLE_RATES)
+
+
+class BaseSimilarView(APIView):
+    """
+    Похожие (через AdGram → ads.telegram.org). Ответ кэшируется на 7 дней по набору имён.
+    503 — похожие сейчас недоступны: фронт прячет кнопку «Add similar …».
+    Создание объявлений от этого не зависит — каналы и боты проверяет резолвер t.me.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [SimilarThrottle]
+    kind = param = serializer_class = None
+
+    def get(self, request):
+        try:
+            names = parse_usernames(request.query_params.get(self.param, ''), self.kind)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            peers = find_similar(self.kind, names)
+        except SimilarUnavailable:
+            return Response({'error': 'Похожие сейчас недоступны'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(self.serializer_class(peers, many=True, context={'request': request}).data)
+
+
+SIMILAR_ERRORS = {400: ERROR_RESPONSE, 503: ERROR_RESPONSE}
+
+
+class SimilarChannelsView(BaseSimilarView):
+    """Похожие каналы для 1–10 каналов: ?channels=kunuz,daryo"""
+    kind, param, serializer_class = 'channels', 'channels', SimilarChannelSerializer
+
+    @extend_schema(parameters=[OpenApiParameter('channels', str, required=True,
+                                                 description='1–10 имён каналов через запятую')],
+                   responses={200: SimilarChannelSerializer(many=True), **SIMILAR_ERRORS})
+    def get(self, request):
+        return super().get(request)
+
+
+class SimilarBotsView(BaseSimilarView):
+    """Похожие боты для 1–9 ботов: ?bots=a_bot,b_bot"""
+    kind, param, serializer_class = 'bots', 'bots', SimilarBotSerializer
+
+    @extend_schema(parameters=[OpenApiParameter('bots', str, required=True,
+                                                 description='1–9 имён ботов через запятую')],
+                   responses={200: SimilarBotSerializer(many=True), **SIMILAR_ERRORS})
+    def get(self, request):
+        return super().get(request)
+

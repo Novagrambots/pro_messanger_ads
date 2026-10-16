@@ -194,6 +194,7 @@ REST_FRAMEWORK = {
         'anon': '500/minute',  # ограничения для анонимных пользователей
         'user': '500/minute',  # ограничения для авторизованных пользователей
         'tg_resolve': '60/minute',  # данные канала/бота по t.me-ссылке (ходит в Telegram)
+        'tg_similar': '20/minute',  # похожие каналы/боты (ходит в AdGram → ads.telegram.org)
     }
 }
 

@@ -57,11 +57,12 @@ class Deadline:
     def __init__(self, seconds):
         self.until = time.monotonic() + seconds
 
-    def timeout(self):
+    def timeout(self, cap=TIMEOUT):
+        """Таймаут очередного запроса: не больше cap и не больше остатка общего лимита"""
         left = self.until - time.monotonic()
         if left <= 0:
             raise DeadlineExceeded('Кончилось время на проверку в Telegram')
-        return min(TIMEOUT, left)
+        return min(cap, left)
 
 
 def normalize_username(value):
@@ -155,15 +156,29 @@ def _save(username, info):
     # update_or_create сам лочит строку и переживает гонку двух первых запросов по одному имени
     peer, _ = TelegramPeer.objects.update_or_create(username=username, defaults=fields)
 
-    new_avatar = info.get('avatar')
-    if info['not_found'] or new_avatar:
-        if peer.avatar:
-            peer.avatar.delete(save=False)
-        if new_avatar:
-            content, ext = new_avatar
-            peer.avatar.save(f'{username}.{ext}', ContentFile(content), save=False)
-        peer.save(update_fields=['avatar'])
+    if info['not_found'] or info.get('avatar'):
+        store_avatar(peer, info.get('avatar'))
     return peer
+
+
+def store_avatar(peer, avatar):
+    """Заменяет аватар: avatar = (байты, расширение) или None (убрать). Старый файл удаляем"""
+    if peer.avatar:
+        peer.avatar.delete(save=False)
+    if avatar:
+        content, ext = avatar
+        peer.avatar.save(f'{peer.username}.{ext}', ContentFile(content), save=False)
+    peer.save(update_fields=['avatar'])
+
+
+def download_cdn_avatar(url, deadline):
+    """
+    Аватар по ссылке со стороны (например, photoUrl из AdGram): качаем только с CDN Telegram
+    https://cdn<цифры>.telesco.pe, иначе None. (байты, расширение) или None
+    """
+    if not isinstance(url, str) or not AVATAR_URL_RE.fullmatch(url):
+        return None
+    return _download_image(url, deadline)
 
 
 # ======================================= Страница t.me =======================================

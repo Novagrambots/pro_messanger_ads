@@ -89,6 +89,9 @@ class TelegramPeer(models.Model):
     monthly_users = models.PositiveIntegerField('Пользователей в месяц (боты)', null=True, blank=True)
     not_found = models.BooleanField('Не найден в Telegram', default=False)
     fetched_at = models.DateTimeField('Когда получили данные')
+    # Непрозрачный хэш ads.telegram.org (из AdGram) — ТОЛЬКО для запросов похожих.
+    # Это не числовой id Telegram: в telegram_id и в таргетинг его не кладём
+    ads_ref = models.CharField('ID на ads.telegram.org', max_length=255, null=True, blank=True)
 
     class Meta:
         verbose_name = 'Канал / бот Telegram'

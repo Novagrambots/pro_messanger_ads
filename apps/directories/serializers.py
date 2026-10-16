@@ -45,3 +45,16 @@ class TelegramPeerSerializer(serializers.ModelSerializer):
             return None
         request = self.context.get('request')
         return request.build_absolute_uri(obj.avatar.url) if request else obj.avatar.url
+
+
+class SimilarChannelSerializer(TelegramPeerSerializer):
+    class Meta(TelegramPeerSerializer.Meta):
+        fields = ['username', 'title', 'avatar_url', 'subscribers']
+        read_only_fields = fields
+
+
+class SimilarBotSerializer(TelegramPeerSerializer):
+    class Meta(TelegramPeerSerializer.Meta):
+        fields = ['username', 'title', 'avatar_url', 'monthly_users']
+        read_only_fields = fields
+
