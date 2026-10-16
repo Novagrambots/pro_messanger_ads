@@ -2,7 +2,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from apps.ads.models import AdDecision, AdRevision
-from apps.ads.serializers import AdRevisionSerializer, AdSerializer
+from apps.ads.serializers import AdMediaBriefSerializer, AdRevisionSerializer, AdSerializer
 
 
 class AdOwnerSerializer(serializers.Serializer):
@@ -45,6 +45,7 @@ class CreativeSerializer(serializers.Serializer):
     text = serializers.CharField()
     show_channel_picture = serializers.BooleanField()
     other_info = serializers.CharField()
+    media = AdMediaBriefSerializer(allow_null=True)
 
 
 class ModerationRevisionSerializer(serializers.ModelSerializer):
@@ -64,9 +65,11 @@ class ModerationRevisionSerializer(serializers.ModelSerializer):
                   'current', 'proposed', 'status', 'created_at']
         read_only_fields = fields
 
-    @staticmethod
-    def _creative(obj):
-        return {field: getattr(obj, field) for field in AdRevision.CREATIVE_FIELDS}
+    def _creative(self, obj):
+        creative = {field: getattr(obj, field) for field in AdRevision.CREATIVE_FIELDS}
+        if creative['media'] is not None:
+            creative['media'] = AdMediaBriefSerializer(creative['media'], context=self.context).data
+        return creative
 
     @extend_schema_field(CreativeSerializer)
     def get_current(self, obj):

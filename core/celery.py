@@ -27,6 +27,11 @@ app.conf.beat_schedule = {
         'task': 'apps.ads.tasks.apply_ad_dates',
         'schedule': crontab(),
     },
+    # Объявления v2: удалить медиа старше суток, которые никуда не прикрепили
+    'cleanup-ad-media-daily': {
+        'task': 'apps.ads.tasks.cleanup_ad_media',
+        'schedule': crontab(minute=30, hour=0),
+    },
     # Возврат дробного остатка бюджета завершённых заказов
     'refund-completed-orders-every-5-minutes': {
         'task': 'apps.billing.tasks.refund_completed_orders',

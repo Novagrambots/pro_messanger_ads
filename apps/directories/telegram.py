@@ -10,6 +10,7 @@
 - ссылки Bot API содержат токен бота: ни URL, ни текст исключений requests (в них URL)
   не попадают ни в логи, ни наружу.
 """
+import hashlib
 import html
 import logging
 import re
@@ -162,12 +163,17 @@ def _save(username, info):
 
 
 def store_avatar(peer, avatar):
-    """Заменяет аватар: avatar = (байты, расширение) или None (убрать). Старый файл удаляем"""
+    """
+    Заменяет аватар: avatar = (байты, расширение) или None (убрать). Старый файл удаляем.
+    В имени — хэш содержимого: новая картинка = новый URL, поэтому /media/ можно отдавать
+    с Cache-Control immutable (Cloudflare и браузеры не покажут старый аватар).
+    """
     if peer.avatar:
         peer.avatar.delete(save=False)
     if avatar:
         content, ext = avatar
-        peer.avatar.save(f'{peer.username}.{ext}', ContentFile(content), save=False)
+        digest = hashlib.sha256(content).hexdigest()[:8]
+        peer.avatar.save(f'{peer.username}_{digest}.{ext}', ContentFile(content), save=False)
     peer.save(update_fields=['avatar'])
 
 

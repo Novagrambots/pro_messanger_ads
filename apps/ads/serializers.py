@@ -5,8 +5,8 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from apps.ads import validators
-from apps.ads.models import (Ad, AdPricing, AdRevision, AdStateError, InitialStatus, Placement,
-                            default_schedule)
+from apps.ads.models import (MEDIA_PLACEMENTS, Ad, AdMedia, AdPricing, AdRevision, AdStateError, InitialStatus,
+                            Placement, default_schedule)
 from apps.billing.models import MoneyOperation
 from apps.billing.services import charge, check_budget, format_money
 from apps.directories.serializers import TelegramPeerSerializer
@@ -25,14 +25,57 @@ class MoneyField(serializers.Field):
         return format_money(value)
 
 
+class AdMediaBriefSerializer(serializers.ModelSerializer):
+    """Медиа внутри объявления, правки и карточки модератора"""
+    type = serializers.CharField(source='media_type', read_only=True)
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AdMedia
+        fields = ['id', 'type', 'url', 'width', 'height', 'duration']
+        read_only_fields = fields
+
+    def get_url(self, obj) -> str:
+        request = self.context.get('request')
+        return request.build_absolute_uri(obj.file.url) if request else obj.file.url
+
+
+class AdMediaSerializer(AdMediaBriefSerializer):
+    """Загруженное медиа и его статус (фронт опрашивает, пока видео обрабатывается)"""
+
+    class Meta(AdMediaBriefSerializer.Meta):
+        fields = AdMediaBriefSerializer.Meta.fields + ['status', 'error', 'size', 'created_at']
+        read_only_fields = fields
+
+
 class AdRevisionSerializer(serializers.ModelSerializer):
     """Правка креатива (ревизия)"""
+    media = AdMediaBriefSerializer(read_only=True, allow_null=True)
 
     class Meta:
         model = AdRevision
-        fields = ['id', 'text', 'show_channel_picture', 'other_info', 'status', 'reason',
+        fields = ['id', 'text', 'show_channel_picture', 'other_info', 'media', 'status', 'reason',
                   'created_at', 'moderated_at']
         read_only_fields = fields
+
+
+def resolve_media(user, media_id, placement):
+    """Медиа для объявления: только своё, готовое и только у сообщения в канале"""
+    if media_id is None:
+        return None
+    if placement not in MEDIA_PLACEMENTS:
+        raise serializers.ValidationError('Фото и видео — только у сообщения в канале')
+    media = AdMedia.objects.filter(pk=media_id, user=user).first()
+    if media is None:
+        raise serializers.ValidationError('Медиа не найдено')  # чужое — тоже «не найдено»
+    if media.status == AdMedia.Status.PROCESSING:
+        raise serializers.ValidationError('Видео ещё обрабатывается — дождитесь статуса READY')
+    if media.status == AdMedia.Status.FAILED:
+        raise serializers.ValidationError(f'Медиа не прошло проверку: {media.error}')
+    return media
+
+
+ERR_MEDIA_WITH_PICTURE = 'Фото канала не показывается вместе с медиа — уберите одно из двух'
 
 
 class AdSerializer(serializers.ModelSerializer):
@@ -43,6 +86,7 @@ class AdSerializer(serializers.ModelSerializer):
     refunded = MoneyField()
     remaining_budget = MoneyField(help_text='Остаток: budget − spent − refunded')
     promoted_peer = TelegramPeerSerializer(read_only=True, help_text='Продвигаемый канал или бот (для превью)')
+    media = AdMediaBriefSerializer(read_only=True, allow_null=True)
     pending_revision = serializers.SerializerMethodField(
         help_text='Правка креатива на проверке (пока её не одобрят, крутится прежний вариант)')
     last_declined_revision = serializers.SerializerMethodField(
@@ -52,7 +96,7 @@ class AdSerializer(serializers.ModelSerializer):
         model = Ad
         fields = [
             'id', 'placement', 'ad_format', 'title', 'text', 'url', 'promoted_peer', 'show_channel_picture',
-            'other_info',
+            'other_info', 'media',
             'cpm', 'budget', 'spent', 'refunded', 'remaining_budget', 'daily_limit', 'views_per_user_per_day',
             'status', 'initial_status', 'start_date', 'end_date', 'schedule', 'targeting',
             'moderation_reason', 'pending_revision', 'last_declined_revision',
@@ -63,12 +107,12 @@ class AdSerializer(serializers.ModelSerializer):
     @extend_schema_field(AdRevisionSerializer(allow_null=True))
     def get_pending_revision(self, obj):
         revision = obj.pending_revision()
-        return AdRevisionSerializer(revision).data if revision else None
+        return AdRevisionSerializer(revision, context=self.context).data if revision else None
 
     @extend_schema_field(AdRevisionSerializer(allow_null=True))
     def get_last_declined_revision(self, obj):
         revision = obj.last_declined_revision()
-        return AdRevisionSerializer(revision).data if revision else None
+        return AdRevisionSerializer(revision, context=self.context).data if revision else None
 
 
 class AdCreateSerializer(serializers.Serializer):
@@ -80,6 +124,8 @@ class AdCreateSerializer(serializers.Serializer):
     url = serializers.CharField(max_length=200, help_text='t.me/<username>')
     show_channel_picture = serializers.BooleanField(required=False, default=False)
     other_info = serializers.CharField(required=False, allow_blank=True, default='', max_length=255)
+    media = serializers.UUIDField(required=False, allow_null=True, default=None,
+                                  help_text='id загруженного медиа (READY); только у сообщения в канале')
     cpm = serializers.IntegerField(min_value=1, help_text='Цена 1000 показов, целые сумы')
     budget = serializers.DecimalField(max_digits=19, decimal_places=2, min_value=Decimal('0.01'),
                                       help_text='У пользователя AdGram — целые сумы')
@@ -137,7 +183,13 @@ class AdCreateSerializer(serializers.Serializer):
             'targeting', lambda: validators.validate_targeting(placement, data['targeting'], promoted_peer,
                                                                batch.resolve))
 
-        min_cpm = pricing.min_cpm(placement, data['show_channel_picture'])
+        data['media'] = check('media', lambda: resolve_media(
+            self.context['request'].user, data['media'], placement))
+        if data['media'] and data['show_channel_picture']:
+            errors['media'] = ERR_MEDIA_WITH_PICTURE
+
+        # Одна наценка к минимуму: видео / фото (дороже при выборе конкретных каналов) / фото канала
+        min_cpm = pricing.min_cpm_for(placement, data['targeting'], data['show_channel_picture'], data['media'])
         if data['cpm'] < min_cpm:
             errors['cpm'] = f"CPM can't be less than {min_cpm}"
         if data['budget'] < pricing.min_budget:
@@ -193,6 +245,7 @@ class AdUpdateSerializer(serializers.Serializer):
     text = serializers.CharField(required=False, allow_blank=True)
     show_channel_picture = serializers.BooleanField(required=False)
     other_info = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    media = serializers.UUIDField(required=False, allow_null=True, help_text='id медиа (READY) или null — убрать')
     cpm = serializers.IntegerField(required=False, min_value=1)
     daily_limit = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     views_per_user_per_day = serializers.IntegerField(required=False, min_value=0, max_value=4)
@@ -227,19 +280,26 @@ class AdUpdateSerializer(serializers.Serializer):
     def validate_schedule(self, value):
         return validators.check_schedule(self.instance.placement, value)
 
+    def validate_media(self, value):
+        return resolve_media(self.context['request'].user, value, self.instance.placement)
+
     def validate(self, data):
-        # Минимальный CPM зависит от фото канала (+наценка). Пока правка с фото на проверке,
-        # объявление может её получить в любой момент — поэтому берём более строгий минимум
-        if 'cpm' in data or 'show_channel_picture' in data:
-            ad = self.instance
-            pending = ad.pending_revision()
-            proposed = data.get('show_channel_picture',
-                                pending.show_channel_picture if pending else ad.show_channel_picture)
-            if ad.applies_creative_directly(self.context['request'].user):
-                picture = proposed
-            else:
-                picture = ad.show_channel_picture or proposed
-            min_cpm = AdPricing.load().min_cpm(ad.placement, picture)
+        ad = self.instance
+        # Креатив после правки: новая правка собирается поверх висящей (как в Ad.update_creative)
+        base = ad.pending_revision() or ad
+        picture = data.get('show_channel_picture', base.show_channel_picture)
+        media = data['media'] if 'media' in data else base.media
+        if ('media' in data or 'show_channel_picture' in data) and media and picture:
+            raise serializers.ValidationError({'media': ERR_MEDIA_WITH_PICTURE})
+
+        # Минимальный CPM зависит от креатива (наценки за медиа и фото канала). Пока правка на проверке,
+        # объявление может получить её в любой момент — поэтому берём более строгий из двух минимумов
+        if {'cpm', 'show_channel_picture', 'media'} & set(data):
+            pricing = AdPricing.load()
+            min_cpm = pricing.min_cpm_for(ad.placement, ad.targeting, picture, media)
+            if not ad.applies_creative_directly(self.context['request'].user):
+                min_cpm = max(min_cpm, pricing.min_cpm_for(ad.placement, ad.targeting, ad.show_channel_picture,
+                                                           ad.media))
             if data.get('cpm', ad.cpm) < min_cpm:
                 raise serializers.ValidationError({'cpm': f"CPM can't be less than {min_cpm}"})
         return data
@@ -276,6 +336,10 @@ class AdPricingSerializer(serializers.Serializer):
     channel_picture_markup_percent = serializers.DecimalField(max_digits=6, decimal_places=2)
     photo_markup_percent = serializers.DecimalField(max_digits=6, decimal_places=2)
     video_markup_percent = serializers.DecimalField(max_digits=6, decimal_places=2)
+    photo_specific_markup_percent = serializers.DecimalField(
+        max_digits=6, decimal_places=2, help_text='Фото в сообщении в канале с выбранными конкретными каналами')
+    video_specific_markup_percent = serializers.DecimalField(
+        max_digits=6, decimal_places=2, help_text='Видео в сообщении в канале с выбранными конкретными каналами')
     min_budget = serializers.IntegerField()
     terms_version = serializers.CharField()
 
@@ -286,6 +350,8 @@ class AdPricingSerializer(serializers.Serializer):
             'channel_picture_markup_percent': pricing.channel_picture_markup_percent,
             'photo_markup_percent': pricing.photo_markup_percent,
             'video_markup_percent': pricing.video_markup_percent,
+            'photo_specific_markup_percent': pricing.photo_specific_markup_percent,
+            'video_specific_markup_percent': pricing.video_specific_markup_percent,
             'min_budget': pricing.min_budget,
             'terms_version': pricing.terms_version,
         })

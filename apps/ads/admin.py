@@ -1,7 +1,7 @@
 from django.contrib import admin, messages
 from django.db import transaction
 
-from apps.ads.models import Ad, AdDecision, AdPricing, AdRevision, AdStateError
+from apps.ads.models import Ad, AdDecision, AdMedia, AdPricing, AdRevision, AdStateError
 
 
 class ReadOnlyInline(admin.TabularInline):
@@ -18,7 +18,8 @@ class ReadOnlyInline(admin.TabularInline):
 
 class AdRevisionInline(ReadOnlyInline):
     model = AdRevision
-    fields = ('created_at', 'status', 'text', 'show_channel_picture', 'other_info', 'reason', 'moderated_by')
+    fields = ('created_at', 'status', 'text', 'show_channel_picture', 'other_info', 'media', 'reason',
+              'moderated_by')
     readonly_fields = fields
 
 
@@ -108,6 +109,27 @@ class AdRevisionAdmin(admin.ModelAdmin):
     list_filter = ('status',)
     search_fields = ('ad__title', 'text', 'ad__user__username')
     list_select_related = ('ad', 'moderated_by')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+
+@admin.register(AdMedia)
+class AdMediaAdmin(admin.ModelAdmin):
+    """Медиа объявлений — только просмотр (неприкреплённые старше суток удаляет beat)"""
+    list_display = ('id', 'user', 'media_type', 'status', 'width', 'height', 'duration', 'size', 'created_at')
+    list_filter = ('media_type', 'status')
+    search_fields = ('id', 'user__username')
+    list_select_related = ('user',)
 
     def has_add_permission(self, request):
         return False

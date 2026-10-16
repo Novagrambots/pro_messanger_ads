@@ -1,9 +1,46 @@
+import logging
+from datetime import timedelta
+
+from django.db.models import ProtectedError
+from django.utils import timezone
+
 from core.celery import app
 
-from apps.ads.models import Ad
+from apps.ads.media import process_video
+from apps.ads.models import Ad, AdMedia
+
+logger = logging.getLogger(__name__)
 
 
 @app.task
 def apply_ad_dates():
     """Раз в минуту: наступил start_date → ACTIVE, наступил end_date → ON_HOLD"""
     Ad.apply_due_dates()
+
+
+@app.task
+def process_ad_media(media_id):
+    """Перекодирование загруженного видео в H.264 mp4 и проверка результата → READY / FAILED"""
+    media = AdMedia.objects.filter(pk=media_id, status=AdMedia.Status.PROCESSING).first()
+    if media:
+        process_video(media)
+
+
+@app.task
+def cleanup_ad_media():
+    """Раз в сутки: медиа старше 24 ч, на которые не ссылается ни одно объявление и ни одна правка"""
+    orphans = AdMedia.objects.filter(created_at__lt=timezone.now() - timedelta(hours=24),
+                                     ads__isnull=True, revisions__isnull=True)
+    deleted = 0
+    for media in orphans:
+        file_name = media.file.name
+        try:
+            media.delete()  # PROTECT: если объявление успело сослаться — строка (и файл) останутся
+        except ProtectedError:
+            continue
+        if file_name:
+            media.file.storage.delete(file_name)
+        deleted += 1
+    logger.info('Удалено неиспользуемых медиа объявлений: %s', deleted)
+    return deleted
+

@@ -10,6 +10,7 @@ from django.core.validators import MinValueValidator, FileExtensionValidator
 from django.db import models, transaction
 
 from apps.billing.models import MoneyOperation
+from apps.common.media import SCALE_CHAT_ADS, transcode_to_h264
 from apps.common.models import ModerationMixin, ModerationStatus
 
 logger = logging.getLogger(__name__)
@@ -69,26 +70,9 @@ class ChatAdMedia(models.Model):
         output_path = os.path.join(os.path.dirname(input_path), output_filename)
 
         try:
-            # Команда FFmpeg:
-            # -i: входной файл
-            # -vcodec libx264: принудительный кодек H.264
-            # -acodec aac: кодек звука, совместимый с большинством устройств
-            # -preset ultrafast: максимально быстрая конвертация (важно для HTTP-запроса)
-            # -y: перезаписать если существует
-            command = [
-                'ffmpeg', '-i', input_path,
-                '-vcodec', 'libx264',
-                '-acodec', 'aac',
-                '-preset', 'ultrafast',  # скорость конвертации (не качество!)
-                '-movflags', '+faststart',  # <<< КРИТИЧЕСКИ ВАЖНО
-                '-vf', 'scale=1280:720',  # уменьшить до 720p (можно 854x480 для экономии)
-                '-b:v', '1M',  # видеобитрейт 1 Мбит/с
-                '-b:a', '128k',  # аудиобитрейт
-                '-y', output_path
-            ]
-
-            # Запускаем процесс
-            subprocess.run(command, check=True, capture_output=True)
+            # Общая функция (apps/common/media.py): H.264 + AAC, +faststart, 1280×720 — как и было.
+            # Плюс защита: вход читается только как mp4/mov и только с диска, есть таймаут
+            transcode_to_h264(input_path, output_path, SCALE_CHAT_ADS)
 
             # 3. Заменяем старый файл новым
             with open(output_path, 'rb') as f:

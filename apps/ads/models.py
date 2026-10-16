@@ -22,6 +22,8 @@ class Placement(models.TextChoices):
 
 
 USERS_PLACEMENTS = (Placement.USERS_CHANNEL_MESSAGE, Placement.USERS_VIDEO_BANNER, Placement.USERS_BOT_BANNER)
+# Фото или видео в объявлении — только у сообщения в канале
+MEDIA_PLACEMENTS = (Placement.CHANNEL_MESSAGE, Placement.USERS_CHANNEL_MESSAGE)
 
 AD_FORMATS = {
     Placement.SEARCH: 'search',
@@ -77,11 +79,16 @@ class AdPricing(models.Model):
 
     channel_picture_markup_percent = models.DecimalField(
         'Наценка за фото канала, %', max_digits=6, decimal_places=2, default=Decimal('30'))
-    # Применит этап 6 (медиа). Значения по умолчанию — по сторонним данным о Telegram
+    # Наценки за медиа. Значения по умолчанию — по сторонним данным о Telegram.
+    # «specific» — у сообщения в канале с явным списком каналов (targeting.channels)
     photo_markup_percent = models.DecimalField(
         'Наценка за фото, %', max_digits=6, decimal_places=2, default=Decimal('50'))
     video_markup_percent = models.DecimalField(
         'Наценка за видео, %', max_digits=6, decimal_places=2, default=Decimal('70'))
+    photo_specific_markup_percent = models.DecimalField(
+        'Наценка за фото при выборе конкретных каналов, %', max_digits=6, decimal_places=2, default=Decimal('80'))
+    video_specific_markup_percent = models.DecimalField(
+        'Наценка за видео при выборе конкретных каналов, %', max_digits=6, decimal_places=2, default=Decimal('100'))
 
     min_budget = models.PositiveIntegerField('Минимальный бюджет, сум', default=10000)
     terms_version = models.CharField('Текущая версия правил', max_length=32, default='1.0')
@@ -103,12 +110,66 @@ class AdPricing(models.Model):
     def base_cpm(self, placement):
         return getattr(self, f'min_cpm_{placement.lower()}')
 
-    def min_cpm(self, placement, show_channel_picture):
-        """Минимальный CPM объявления = базовый × (1 + наценка). CPM целый — округляем вверх до сума"""
-        minimum = Decimal(self.base_cpm(placement))
+    def markup_percent(self, show_channel_picture, media_type=None, specific_channels=False):
+        """
+        Действует одна наценка: видео → фото → фото канала → 0.
+        У видео и фото — «specific», если в сообщении в канале выбраны конкретные каналы
+        """
+        if media_type == AdMedia.MediaType.VIDEO:
+            return self.video_specific_markup_percent if specific_channels else self.video_markup_percent
+        if media_type == AdMedia.MediaType.PHOTO:
+            return self.photo_specific_markup_percent if specific_channels else self.photo_markup_percent
         if show_channel_picture:
-            minimum *= 1 + self.channel_picture_markup_percent / 100
-        return math.ceil(minimum)
+            return self.channel_picture_markup_percent
+        return Decimal('0')
+
+    def min_cpm(self, placement, show_channel_picture, media_type=None, specific_channels=False):
+        """Минимальный CPM объявления = базовый × (1 + наценка). CPM целый — округляем вверх до сума"""
+        percent = self.markup_percent(show_channel_picture, media_type, specific_channels)
+        return math.ceil(Decimal(self.base_cpm(placement)) * (1 + percent / 100))
+
+    def min_cpm_for(self, placement, targeting, show_channel_picture, media):
+        """То же по данным объявления: media — AdMedia или None, targeting — уже проверенный"""
+        specific = placement == Placement.CHANNEL_MESSAGE and bool((targeting or {}).get('channels'))
+        return self.min_cpm(placement, show_channel_picture, media.media_type if media else None, specific)
+
+
+class AdMedia(models.Model):
+    """
+    Фото или видео для объявления — загружается ДО создания объявления (или правки).
+    Проверки — по содержимому файла (apps/ads/media.py). Видео перекодируется в фоне
+    (H.264 mp4): пока PROCESSING, прикрепить нельзя. Неприкреплённые старше суток удаляет beat.
+    """
+
+    class MediaType(models.TextChoices):
+        PHOTO = 'PHOTO', 'Фото'
+        VIDEO = 'VIDEO', 'Видео'
+
+    class Status(models.TextChoices):
+        PROCESSING = 'PROCESSING', 'Обрабатывается'
+        READY = 'READY', 'Готово'
+        FAILED = 'FAILED', 'Не прошло проверку'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='ad_media',
+                             verbose_name='Владелец')
+    file = models.FileField('Файл', upload_to='ads/media/')
+    media_type = models.CharField('Тип', max_length=8, choices=MediaType.choices)
+    width = models.PositiveIntegerField('Ширина', null=True, blank=True)
+    height = models.PositiveIntegerField('Высота', null=True, blank=True)
+    duration = models.DecimalField('Длительность, с', max_digits=6, decimal_places=2, null=True, blank=True)
+    size = models.PositiveIntegerField('Размер, байт', default=0)
+    status = models.CharField('Статус', max_length=12, choices=Status.choices, default=Status.PROCESSING)
+    error = models.CharField('Ошибка', max_length=255, blank=True, default='')
+    created_at = models.DateTimeField('Загружено', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Медиа объявления'
+        verbose_name_plural = 'Медиа объявлений'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.get_media_type_display()} {self.id} ({self.get_status_display()})'
 
 
 class Ad(models.Model):
@@ -138,6 +199,9 @@ class Ad(models.Model):
     # Пусто только у объявлений, созданных до этапа 5а
     promoted_peer = models.ForeignKey('directories.TelegramPeer', on_delete=models.PROTECT, null=True, blank=True,
                                       related_name='promoted_ads', verbose_name='Продвигаемый канал / бот')
+    # Фото или видео (только у сообщения в канале); меняется через ревизию, как остальной креатив
+    media = models.ForeignKey(AdMedia, on_delete=models.PROTECT, null=True, blank=True, related_name='ads',
+                              verbose_name='Медиа')
 
     # Деньги и ставка
     cpm = models.PositiveIntegerField('CPM, сум', help_text='Цена 1000 показов, целые сумы')
@@ -429,8 +493,8 @@ class AdRevision(models.Model):
         DECLINED = 'DECLINED', 'Отклонена'
         SUPERSEDED = 'SUPERSEDED', 'Заменена'  # пришла новая правка, объявление заблокировали или удалили
 
-    # Поля креатива, которые меняются через ревизию (медиа добавит этап 6)
-    CREATIVE_FIELDS = ('text', 'show_channel_picture', 'other_info')
+    # Поля креатива, которые меняются через ревизию
+    CREATIVE_FIELDS = ('text', 'show_channel_picture', 'other_info', 'media')
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     ad = models.ForeignKey(Ad, on_delete=models.CASCADE, related_name='revisions', verbose_name='Объявление')
@@ -439,7 +503,9 @@ class AdRevision(models.Model):
     text = models.CharField('Текст', max_length=160, blank=True, default='')
     show_channel_picture = models.BooleanField('Показывать фото канала', default=False)
     other_info = models.CharField('Другая информация', max_length=255, blank=True, default='')
-    # Этап 6: здесь будет медиа (фото / видео) — тоже через ревизию
+    # Фото или видео после правки (None — медиа убрали)
+    media = models.ForeignKey(AdMedia, on_delete=models.PROTECT, null=True, blank=True, related_name='revisions',
+                              verbose_name='Медиа')
 
     status = models.CharField('Статус', max_length=12, choices=Status.choices,
                               default=Status.PENDING, db_index=True)

@@ -1,13 +1,17 @@
+import logging
+
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema
 from rest_framework import generics, permissions, status
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.ads.models import Ad, AdPricing, AdStateError, AdStatus
-from apps.ads.serializers import (AdBudgetTopUpSerializer, AdCreateSerializer, AdPricingSerializer, AdSerializer,
-                                  AdUpdateSerializer, BudgetOperationSerializer)
+from apps.ads.media import MediaError, save_upload
+from apps.ads.models import Ad, AdMedia, AdPricing, AdStateError, AdStatus
+from apps.ads.serializers import (AdBudgetTopUpSerializer, AdCreateSerializer, AdMediaSerializer, AdPricingSerializer,
+                                  AdSerializer, AdUpdateSerializer, BudgetOperationSerializer)
 from apps.billing.models import MoneyOperation
 from apps.billing.services import charge, format_money
 from apps.common.pagination import StandardResultsSetPagination
@@ -154,3 +158,57 @@ class AdPricingView(APIView):
     @extend_schema(responses={200: AdPricingSerializer})
     def get(self, request):
         return Response(AdPricingSerializer.from_pricing(AdPricing.load()).data)
+
+
+logger = logging.getLogger(__name__)
+MEDIA_UPLOAD_REQUEST = {'multipart/form-data': {'type': 'object', 'properties': {
+    'file': {'type': 'string', 'format': 'binary',
+             'description': 'Фото jpg/png (до 5 МБ) или видео mp4/mov (до 20 МБ, 3–60 с); 16:9, ширина от 640 px'},
+}, 'required': ['file']}}
+
+
+def enqueue_video(media_id):
+    """Ставит видео в обработку. Брокер недоступен — сразу FAILED, а не вечный PROCESSING"""
+    from apps.ads.tasks import process_ad_media
+    try:
+        process_ad_media.delay(str(media_id))
+    except Exception:
+        logger.exception('Не удалось поставить видео %s в обработку', media_id)
+        AdMedia.objects.filter(pk=media_id, status=AdMedia.Status.PROCESSING).update(
+            status=AdMedia.Status.FAILED, error='Не удалось поставить видео в обработку, загрузите ещё раз')
+
+
+class AdMediaUploadView(generics.GenericAPIView):
+    """
+    Загрузка фото или видео для объявления (до создания объявления или правки).
+    Проверки — по содержимому файла. Фото сразу READY; видео — PROCESSING, пока перекодируется
+    в фоне (статус — GET /api/ads/media/<id>/). Прикрепить можно только READY.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+    serializer_class = AdMediaSerializer
+
+    @extend_schema(request=MEDIA_UPLOAD_REQUEST, responses={201: AdMediaSerializer, 400: STATE_ERROR_RESPONSE})
+    def post(self, request):
+        uploaded = request.FILES.get('file')
+        if uploaded is None:
+            return Response({'file': 'Прикрепите файл'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            media = save_upload(request.user, uploaded)
+        except MediaError as exc:
+            return Response({'file': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if media.status == AdMedia.Status.PROCESSING:
+            transaction.on_commit(lambda: enqueue_video(media.pk))
+        return Response(AdMediaSerializer(media, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+
+class AdMediaDetailView(generics.RetrieveAPIView):
+    """Статус медиа (фронт опрашивает, пока видео PROCESSING). Чужое — 404"""
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = AdMediaSerializer
+
+    def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False):
+            return AdMedia.objects.none()
+        return AdMedia.objects.filter(user=self.request.user)
+
