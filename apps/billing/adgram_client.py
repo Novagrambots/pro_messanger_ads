@@ -10,6 +10,7 @@ from decimal import Decimal
 
 import requests
 from django.conf import settings
+from urllib3.exceptions import NewConnectionError
 
 
 # Таймауты (соединение, ответ) в секундах — дольше пользователя не держим
@@ -32,6 +33,13 @@ class AdGramUnavailable(AdGramError):
     def __init__(self, message='', retry_after=None):
         super().__init__(message)
         self.retry_after = retry_after  # секунды из Retry-After (у 429 данных Telegram)
+
+
+class AdGramNotSent(AdGramUnavailable):
+    """
+    Запрос точно не ушёл (таймаут или отказ при установке соединения) — операция точно не прошла.
+    Для повторов это обычный «недоступен», а первое списание можно сразу считать FAILED
+    """
 
 
 class AdGramRejected(AdGramError):
@@ -190,7 +198,8 @@ def _request(method, path, json=None, timeout=TIMEOUT):
         response = requests.request(method, url, json=json, timeout=timeout, allow_redirects=False,
                                     headers={'X-Internal-Key': settings.ADGRAM_INTERNAL_KEY})
     except requests.RequestException as exc:
-        raise AdGramUnavailable(f'AdGram недоступен: {exc}') from exc
+        error = AdGramNotSent if _request_not_sent(exc) else AdGramUnavailable
+        raise error(f'AdGram недоступен: {exc}') from exc
 
     if response.status_code >= 500:
         raise AdGramUnavailable(f'AdGram ответил {response.status_code}')
@@ -203,3 +212,16 @@ def _request(method, path, json=None, timeout=TIMEOUT):
     if response.status_code != 200:
         raise AdGramRejected(response.status_code, data, response.headers)
     return data
+
+
+def _request_not_sent(exc):
+    """
+    Запрос точно не ушёл: таймаут соединения или отказ в соединении (в т.ч. DNS — подкласс
+    NewConnectionError). Общий requests.ConnectionError сюда не годится: туда же попадает обрыв
+    уже ПОСЛЕ отправки (RemoteDisconnected) — там исход неизвестен. Поэтому смотрим на причину внутри
+    """
+    if isinstance(exc, requests.ConnectTimeout):
+        return True
+    reason = getattr(exc.args[0], 'reason', None) if exc.args else None
+    return isinstance(reason, (NewConnectionError, ConnectionRefusedError))
+

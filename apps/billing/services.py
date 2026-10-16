@@ -17,7 +17,7 @@ from django.utils import timezone
 from rest_framework import exceptions, serializers
 
 from apps.billing import adgram_client
-from apps.billing.adgram_client import AdGramError, AdGramRejected, AdGramUnavailable
+from apps.billing.adgram_client import AdGramError, AdGramNotSent, AdGramRejected, AdGramUnavailable
 from apps.billing.models import Balance, MoneyOperation
 from apps.common.models import ModerationStatus
 
@@ -86,7 +86,8 @@ def _charge_local(user, paid, order_type, create_order, reason):
     with transaction.atomic():
         balance = _lock_balance(user)
         if balance.amount < paid:
-            raise serializers.ValidationError({'budget': f'Недостаточно средств. Доступно: {balance.amount}'})
+            # Списком, как ошибки валидации DRF: эта ошибка рождается уже в save(), и DRF её сам не обернёт
+            raise serializers.ValidationError({'budget': [f'Недостаточно средств. Доступно: {balance.amount}']})
 
         carry = balance.carry
         balance.amount -= paid
@@ -118,6 +119,11 @@ def _charge_adgram(user, paid, order_type, create_order, reason):
     # b) Идём в AdGram вне транзакции БД
     try:
         result = adgram_client.debit(user.adgram_user_id, paid, op.pk, note=_note(op))
+    except AdGramNotSent as exc:
+        # Запрос точно не дошёл до AdGram — деньги не списаны: сразу FAILED, без добивания и компенсации
+        MoneyOperation.objects.filter(pk=op.pk).update(
+            status=MoneyOperation.Status.FAILED, last_error=str(exc)[:2000], updated_at=timezone.now())
+        raise PaymentUnavailable('AdGram сейчас недоступен — деньги не списаны, попробуйте позже')
     except AdGramUnavailable as exc:
         _save_error(op, exc)  # остаётся PENDING — beat повторит тем же operationId
         raise PaymentUnavailable()
@@ -150,8 +156,9 @@ def _charge_adgram(user, paid, order_type, create_order, reason):
 
 def _debit_error_for_client(user, exc):
     """Отказ AdGram в списании → понятный ответ пользователю"""
+    # Ошибки по полю — списком, как у DRF; balance — значение, а не ошибка
     if exc.status_code == 402:
-        detail = {'budget': 'Недостаточно средств на балансе AdGram'}
+        detail = {'budget': ['Недостаточно средств на балансе AdGram']}
         if exc.data.get('balanceUzs') is not None:
             # Как в /api/balance/: баланс AdGram + дробный остаток у нас
             detail['balance'] = format_money(Decimal(str(exc.data['balanceUzs'])) + _carry_of(user))
@@ -159,7 +166,7 @@ def _debit_error_for_client(user, exc):
     if exc.status_code == 403:
         return exceptions.PermissionDenied('Пользователь заблокирован в AdGram')
     if exc.status_code == 404:
-        return serializers.ValidationError({'budget': 'Пользователь не найден в AdGram'})
+        return serializers.ValidationError({'budget': ['Пользователь не найден в AdGram']})
     return PaymentUnavailable()
 
 

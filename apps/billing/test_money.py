@@ -4,12 +4,15 @@
 AdGram замокан — в сеть тесты не ходят.
 """
 import importlib
+import socket
 import threading
 import uuid
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
 from unittest.mock import patch
+
+import requests
 
 from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
@@ -21,7 +24,9 @@ from rest_framework.test import APIClient
 
 from apps.account.services import create_user_with_balance
 from apps.billing import services
-from apps.billing.adgram_client import AdGramRejected, AdGramUnavailable, OperationResult, WalletBalance
+from apps.billing import adgram_client
+from apps.billing.adgram_client import (AdGramNotSent, AdGramRejected, AdGramUnavailable, OperationResult,
+                                        WalletBalance)
 from apps.billing.models import Balance, MoneyOperation
 from apps.chat_ads.models import ChatAdOrder
 from apps.common.models import ModerationStatus
@@ -147,7 +152,7 @@ class AdGramChargeTests(TestCase):
         with patch('apps.billing.adgram_client.debit', side_effect=AdGramRejected(402, {'balanceUzs': 300})):
             response = create_search_order(self.client, '1000')
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.data['budget'], 'Недостаточно средств на балансе AdGram')
+        self.assertEqual(response.data['budget'], ['Недостаточно средств на балансе AdGram'])  # формат DRF
         self.assertEqual(response.data['balance'], '300.40')  # как в /api/balance/: AdGram + carry
         self.assertEqual(Op.objects.get().status, Op.Status.FAILED)
         self.assertFalse(Order.objects.exists())
@@ -440,8 +445,12 @@ class LocalWalletTests(TestCase):
         user = make_local_user(amount='10.00')
         response = create_chat_order(client_for(user), '60.00')
         self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['budget'], ['Недостаточно средств. Доступно: 10.00'])  # формат DRF — список
         self.assertFalse(ChatAdOrder.objects.exists())
         self.assertFalse(Op.objects.exists())
+
+        response = create_search_order(client_for(user), '60.00')  # старый заказ поиска — тот же формат
+        self.assertEqual(response.data['budget'], ['Недостаточно средств. Доступно: 10.00'])
 
 
 class ParallelRefundTests(TransactionTestCase):
@@ -609,3 +618,112 @@ class LegacyRefundTests(TestCase):
         out = StringIO()
         call_command('legacy_refund_report', stdout=out)
         self.assertIn('Итого заказов: 0', out.getvalue())
+
+
+
+def closed_port():
+    """Порт, на котором никто не слушает — соединение будет отклонено"""
+    sock = socket.socket()
+    sock.bind(('127.0.0.1', 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+class HangUpServer:
+    """Принимает запрос и закрывает соединение без ответа — обрыв уже ПОСЛЕ отправки"""
+
+    def __init__(self):
+        self.sock = socket.socket()
+        self.sock.bind(('127.0.0.1', 0))
+        self.sock.listen()
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            conn.recv(65536)
+            conn.close()
+
+    def close(self):
+        self.sock.close()
+
+
+@patch('apps.billing.services.enqueue_send', side_effect=send_now)
+class AdGramNotSentTests(TestCase):
+    """
+    Запрос в AdGram точно не ушёл (отказ / таймаут соединения) → списание сразу FAILED, без добивания
+    и компенсации. Обрыв после отправки или таймаут ответа — исход неизвестен → PENDING, как раньше.
+    """
+
+    def setUp(self):
+        self.user = make_adgram_user()
+        self.client = client_for(self.user)
+
+    def create(self):
+        return create_search_order(self.client, '1000')
+
+    def assert_failed_for_good(self, response):
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('деньги не списаны', str(response.data['detail']))
+        op = Op.objects.get()
+        self.assertEqual(op.status, Op.Status.FAILED)
+        # Ни добивания, ни компенсации: деньги не уходили
+        shift_back(op, minutes=11)
+        with override_settings(**ADGRAM_SETTINGS), patch('apps.billing.adgram_client.debit') as debit:
+            services.retry_pending_operations()
+            services.compensate_orphan_debits()
+        debit.assert_not_called()
+        self.assertEqual(Op.objects.count(), 1)
+
+    def test_connection_refused(self, _send):
+        with override_settings(ADGRAM_INTERNAL_URL=f'http://127.0.0.1:{closed_port()}', ADGRAM_INTERNAL_KEY='k'):
+            self.assert_failed_for_good(self.create())
+
+    def test_connect_timeout(self, _send):
+        with override_settings(**ADGRAM_SETTINGS), \
+                patch('apps.billing.adgram_client.requests.request', side_effect=requests.ConnectTimeout('connect')):
+            self.assert_failed_for_good(self.create())
+
+    def test_hang_up_after_send_stays_pending(self, _send):
+        server = HangUpServer()
+        self.addCleanup(server.close)
+        with override_settings(ADGRAM_INTERNAL_URL=f'http://127.0.0.1:{server.port}', ADGRAM_INTERNAL_KEY='k'):
+            response = self.create()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(Op.objects.get().status, Op.Status.PENDING)  # мог дойти — добьём тем же operationId
+
+    def test_read_timeout_stays_pending(self, _send):
+        with override_settings(**ADGRAM_SETTINGS), \
+                patch('apps.billing.adgram_client.requests.request', side_effect=requests.ReadTimeout('read')):
+            self.assertEqual(self.create().status_code, 503)
+        self.assertEqual(Op.objects.get().status, Op.Status.PENDING)
+
+    @override_settings(**ADGRAM_SETTINGS)
+    def test_client_classification(self, _send):
+        server = HangUpServer()
+        self.addCleanup(server.close)
+        cases = (
+            (f'http://127.0.0.1:{closed_port()}', AdGramNotSent),       # отказ в соединении
+            (f'http://127.0.0.1:{server.port}', AdGramUnavailable),     # обрыв после отправки
+        )
+        for url, expected in cases:
+            with self.subTest(url=url), override_settings(ADGRAM_INTERNAL_URL=url), \
+                    self.assertRaises(AdGramUnavailable) as error:
+                adgram_client.balance('cl1')
+            self.assertIs(type(error.exception), expected)
+
+    @override_settings(**ADGRAM_SETTINGS)
+    def test_retry_of_pending_debit_never_fails_it(self, _send):
+        """Повтор PENDING-списания: «не ушёл» на повторе не значит, что не ушёл первый раз → остаётся PENDING"""
+        with patch('apps.billing.adgram_client.requests.request', side_effect=requests.ReadTimeout('read')):
+            self.create()
+        op = Op.objects.get()
+        shift_back(op, minutes=2)
+        with patch('apps.billing.adgram_client.requests.request', side_effect=requests.ConnectTimeout('c')):
+            services.retry_pending_operations()
+        self.assertEqual(Op.objects.get().status, Op.Status.PENDING)
