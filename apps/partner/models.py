@@ -1,6 +1,7 @@
 from decimal import Decimal, ROUND_DOWN
 
 from django.conf import settings
+from django.contrib.postgres.fields import ArrayField
 from django.db import models, transaction
 from django.utils import timezone
 
@@ -19,6 +20,11 @@ class ChannelEarning(models.Model):
     class ClaimStatus(models.TextChoices):
         UNCLAIMED = 'UNCLAIMED', 'Не заявлен'
         CONFIRMED = 'CONFIRMED', 'Подтверждён'
+
+    class MetaRole(models.TextChoices):
+        """Кто последним менял язык и темы канала"""
+        OWNER = 'OWNER', 'Владелец'
+        MODERATOR = 'MODERATOR', 'Модератор'
 
     # Числовой id канала в Telegram — ключ начисления.
     channel_id = models.BigIntegerField(
@@ -52,19 +58,19 @@ class ChannelEarning(models.Model):
     )
     claimed_at = models.DateTimeField('Подтверждён', null=True, blank=True)
 
-    # Деньги храним с повышенной точностью (4 знака): цена одного показа может
-    # быть долями тийина, и округление КАЖДОГО показа до 2 знаков потеряло бы всё.
+    # Деньги храним с повышенной точностью (6 знаков, как деньги объявлений v2): доля
+    # с одного показа — тысячная цены × доля в тысячных = миллионные сума, без округления.
     # Округляем до копеек/тийинов только при выводе.
     available = models.DecimalField(
         verbose_name='Доступно к выводу',
-        max_digits=18,
-        decimal_places=4,
+        max_digits=20,
+        decimal_places=6,
         default=Decimal('0'),
     )
     total_earned = models.DecimalField(
         verbose_name='Заработано всего',
-        max_digits=18,
-        decimal_places=4,
+        max_digits=20,
+        decimal_places=6,
         default=Decimal('0'),
     )
     total_impressions = models.PositiveBigIntegerField(
@@ -82,6 +88,18 @@ class ChannelEarning(models.Model):
         blank=True,
         help_text='Например 0.5 = 50%. Пусто — берётся значение по умолчанию.',
     )
+
+    # Язык и темы канала — для выдачи «сообщение в канале» по языкам и темам.
+    # Указывает владелец; модератор может поправить — после этого владелец их не меняет
+    language = models.ForeignKey('directories.Language', on_delete=models.SET_NULL, null=True, blank=True,
+                                 related_name='+', verbose_name='Язык канала')
+    topics = ArrayField(models.PositiveSmallIntegerField(), verbose_name='Темы канала (id)', default=list,
+                        blank=True, help_text='1–3 id из справочника тем')
+    meta_updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+                                        related_name='+', verbose_name='Кто менял язык и темы')
+    meta_updated_role = models.CharField('Кем менялись язык и темы', max_length=10, choices=MetaRole.choices,
+                                         blank=True, default='')
+    meta_updated_at = models.DateTimeField('Когда менялись язык и темы', null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -189,6 +207,21 @@ class ChannelEarning(models.Model):
         )
         return payout
 
+    def set_meta(self, language, topics, user, role):
+        """
+        Язык и темы канала (значения уже проверил сериализатор). Вызывать под select_for_update.
+        После правки модератора владелец их не меняет (иначе мог бы вернуть неверные ради показов).
+        """
+        if role == self.MetaRole.OWNER and self.meta_updated_role == self.MetaRole.MODERATOR:
+            raise PermissionError('Язык и темы проверены модератором, для изменения обратитесь в поддержку')
+        self.language = language
+        self.topics = topics
+        self.meta_updated_by = user
+        self.meta_updated_role = role
+        self.meta_updated_at = timezone.now()
+        self.save(update_fields=['language', 'topics', 'meta_updated_by', 'meta_updated_role', 'meta_updated_at',
+                                 'updated_at'])
+
     def claim_by(self, user):
         """
         Закрепляет канал за пользователем.
@@ -230,8 +263,17 @@ class EarningTransaction(models.Model):
         related_name='earning_transactions',
         verbose_name='Заказ-источник',
     )
+    # Объявление v2 — источник начисления (пишет сброс показов, apps/ads/serving/flush.py)
+    ad = models.ForeignKey(
+        'ads.Ad',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='earning_transactions',
+        verbose_name='Объявление-источник',
+    )
     kind = models.CharField(max_length=10, choices=Kind.choices, verbose_name='Тип')
-    amount = models.DecimalField(max_digits=18, decimal_places=4, verbose_name='Сумма')
+    amount = models.DecimalField(max_digits=20, decimal_places=6, verbose_name='Сумма')
     impressions = models.PositiveBigIntegerField(default=0, verbose_name='Показов')
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -246,6 +288,12 @@ class EarningTransaction(models.Model):
             models.UniqueConstraint(
                 fields=['channel', 'order', 'kind'],
                 name='uniq_accrual_per_channel_order',
+            ),
+            # У объявлений v2 — один агрегат на пару (канал, объявление)
+            models.UniqueConstraint(
+                fields=['channel', 'ad', 'kind'],
+                condition=models.Q(ad__isnull=False),
+                name='uniq_accrual_per_channel_ad',
             ),
         ]
         indexes = [

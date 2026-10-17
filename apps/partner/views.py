@@ -10,7 +10,7 @@ from apps.common.schema import ERROR_RESPONSE, MESSAGE_RESPONSE
 from .models import ChannelEarning
 from .serializers import (
     PublicEarningSerializer, MyEarningSerializer, ClaimRequestSerializer,
-    WithdrawRequestSerializer, MessageSerializer, AdminEarningSerializer,
+    WithdrawRequestSerializer, MessageSerializer, AdminEarningSerializer, ChannelMetaSerializer,
 )
 
 
@@ -158,3 +158,38 @@ class WithdrawEarningView(APIView):
         if payout <= 0:
             return Response({'message': 'Нет средств к выводу'}, status=status.HTTP_400_BAD_REQUEST)
         return Response({'message': f'Переведено на баланс: {payout}'}, status=status.HTTP_200_OK)
+
+
+def update_channel_meta(earning, data, user, role):
+    """PATCH языка и тем: прислали что-то одно — второе остаётся прежним"""
+    earning.set_meta(data.get('language', earning.language), data.get('topics', earning.topics), user, role)
+
+
+class ChannelMetaView(APIView):
+    """
+    Язык и темы своего подтверждённого канала — для рекламы в каналах по языкам и темам.
+    PATCH /api/partner/channels/<channel_id>/  body: {"language": "uz", "topics": [12, 45]}
+    После правки модератора владелец их не меняет (403).
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @extend_schema(request=ChannelMetaSerializer, responses={
+        200: MyEarningSerializer,
+        403: ERROR_RESPONSE,  # язык и темы уже проверил модератор
+        404: ERROR_RESPONSE,  # канал не найден или не закреплён за вами
+    })
+    def patch(self, request, channel_id):
+        serializer = ChannelMetaSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            earning = ChannelEarning.objects.select_for_update().filter(
+                channel_id=int(channel_id), owner=request.user, claim_status=ChannelEarning.ClaimStatus.CONFIRMED,
+            ).first()
+            if earning is None:
+                return Response({'error': 'Канал не найден или не закреплён за вами'},
+                                status=status.HTTP_404_NOT_FOUND)
+            try:
+                update_channel_meta(earning, serializer.validated_data, request.user, ChannelEarning.MetaRole.OWNER)
+            except PermissionError as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        return Response(MyEarningSerializer(earning).data)

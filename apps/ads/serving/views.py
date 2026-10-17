@@ -5,6 +5,7 @@
 """
 import json
 import logging
+import re
 import time
 
 import redis
@@ -26,6 +27,7 @@ from . import tokens
 logger = logging.getLogger(__name__)
 
 MAX_QUERY_LENGTH = 256
+CHANNEL_ID_RE = re.compile(r'-100\d{10,13}')  # id канала как в Bot API / TDLib
 MAX_REPORT_DETAILS = 500
 CLIENT_FIELDS = ('lang', 'platform', 'app_version')  # принимаем, для поиска пока не используются
 _last_outage_log = 0.0
@@ -84,6 +86,14 @@ def _bot_username(value):
     return name if name.endswith('bot') else None
 
 
+def _channel_id(value):
+    """id канала из контекста: число или строка в формате -100… Иначе None"""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    value = str(value).strip()
+    return int(value) if CHANNEL_ID_RE.fullmatch(value) else None
+
+
 def _public_ad(entry, request, random_id):
     """Объявление для клиента: публичная часть снимка + random_id, ссылки на файлы — абсолютные"""
     ad = {'random_id': random_id, **entry.payload}
@@ -114,7 +124,7 @@ def serve(request):
         if value is not None and (not isinstance(value, str) or len(value) > 64):
             return _error(f'{field} — строка до 64 символов', 400)
 
-    key = ''  # контекст места показа: фраза поиска или имя бота
+    key = ''  # контекст места показа: фраза поиска, имя бота или id канала
     if placement == Placement.SEARCH:
         query = context.get('query')
         if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY_LENGTH:
@@ -124,6 +134,10 @@ def serve(request):
         key = _bot_username(context.get('bot_username'))
         if key is None:
             return _error('context.bot_username — имя бота в Telegram (оканчивается на «bot»)', 400)
+    elif placement == Placement.CHANNEL_MESSAGE:
+        key = _channel_id(context.get('channel_id'))
+        if key is None:
+            return _error('context.channel_id — id канала в формате -100… (как в Bot API)', 400)
 
     try:
         if S.over_rate_limit([('serve', viewer, settings.ADS_RATE_VIEWER_SERVE),
@@ -137,7 +151,10 @@ def serve(request):
 
     ads = []
     if entry is not None:
-        random_id = tokens.issue(entry.id, viewer, placement, tokens.context_hash(placement, key))
+        # В сообщении в канале id канала — в токене: по нему начислится заработок партнёру
+        channel_id = key if placement == Placement.CHANNEL_MESSAGE else None
+        random_id = tokens.issue(entry.id, viewer, placement, tokens.context_hash(placement, key),
+                                 channel_id=channel_id)
         ads.append(_public_ad(entry, request, random_id))
     return JsonResponse({'ads': ads, 'ttl_seconds': settings.ADS_CACHE_TTL})
 

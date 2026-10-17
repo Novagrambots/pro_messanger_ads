@@ -1,8 +1,9 @@
-from django.urls import path
+from django.urls import path, re_path
 
 from .ad_views import (AdReportsListView, AllAdsListView, ApproveAdView, ApproveRevisionView, BlockAdView,
                        DeclineAdView, DeclineRevisionView, ModerationAdDetailView, PendingAdsListView,
                        PendingRevisionsListView, ReviewAdReportView)
+from .channel_views import ModerationChannelMetaView, ModerationChannelsListView
 from .views import (PendingSearchAdsListView, PendingChatAdsListView, PendingCountView,
                     ApproveOrderView, RejectOrderView, BlockOrderView,
                     AllSearchAdsListView, AllChatAdsListView)
@@ -22,6 +23,11 @@ urlpatterns = [
     path('ads/<uuid:pk>/approve/', ApproveAdView.as_view(), name='moderation-ads-approve'),
     path('ads/<uuid:pk>/decline/', DeclineAdView.as_view(), name='moderation-ads-decline'),
     path('ads/<uuid:pk>/block/', BlockAdView.as_view(), name='moderation-ads-block'),
+
+    # Каналы партнёрки: язык и темы (id канала -100… отрицательный — <int:> его не пропустит)
+    path('channels/', ModerationChannelsListView.as_view(), name='moderation-channels'),
+    re_path(r'^channels/(?P<channel_id>-?\d{1,20})/$', ModerationChannelMetaView.as_view(),
+            name='moderation-channel-meta'),
 
     # Очереди на модерацию (по типам рекламы)
     path('search_ads/pending/', PendingSearchAdsListView.as_view(), name='moderation-search-pending'),

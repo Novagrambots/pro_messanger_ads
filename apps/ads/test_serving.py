@@ -2,7 +2,7 @@
 Тесты выдачи v2 (apps/ads/serving) на настоящем Redis: выбор, токены, события, сброс в Postgres,
 заморозка перед возвратом, ноль SQL на горячем пути, гонка параллельных показов в потоках,
 порядок блокировок «объявление → баланс», очереди Celery, жалобы зрителей и сервис serving,
-место показа BOT (плашка в чате с ботом).
+место показа BOT (плашка в чате с ботом), CHANNEL_MESSAGE (сообщение в канале) и заработок партнёра.
 Redis — ADS_REDIS_TEST_URL (по умолчанию redis://localhost:6379/15), очищается перед каждым тестом.
 """
 import json
@@ -24,12 +24,15 @@ from django.utils import timezone
 from apps.ads.models import Ad, AdDailyStat, AdReport, AdStatus, FlushBatch, Placement
 from apps.ads.serving import events, flush as flushing, selection, snapshot, store as S, tokens
 from apps.ads.serving import views as serving_views
-from apps.ads.tests import KUNUZ_ID, client_for, create_ad, make_local_user, setUpModule, tearDownModule  # noqa: F401
+from apps.ads.models import AdMedia
+from apps.ads.tests import (DARYO_ID, KUNUZ_ID, SPORTS, client_for, create_ad, make_local_user,  # noqa: F401
+                            setUpModule, tearDownModule)
 from apps.billing import services as billing_services
 from apps.billing.models import Balance, MoneyOperation as Op
 from apps.directories.models import TelegramPeer
 from apps.moderation.test_ads import make_moderator
 from apps.notifications.models import Notification
+from apps.partner.models import ChannelEarning, EarningTransaction
 
 User = get_user_model()
 
@@ -247,7 +250,7 @@ class SelectionTests(ServingBase):
         })
         self.assertEqual((item['placement'], item['text'], item['url'], item['button_type'], item['media'],
                           item['label']), (Placement.SEARCH, '', ad.url, 'CHANNEL', None, 'Ad'))
-        self.assertEqual(len(item['random_id']), 94)
+        self.assertEqual(len(item['random_id']), 104)
         self.assertNotIn('cpm', json.dumps(data))
 
     def test_only_active_ads(self):
@@ -260,7 +263,7 @@ class SelectionTests(ServingBase):
     def test_other_placements_are_empty_for_now(self):
         self.active_ad()
         self.reload()
-        response = self.serve(placement=Placement.CHANNEL_MESSAGE)  # каналы — этап 7б
+        response = self.serve(placement=Placement.USERS_CHANNEL_MESSAGE)  # пользователи — этап 7г
         self.assertEqual(response.json(), {'ads': [], 'ttl_seconds': settings.ADS_CACHE_TTL})
 
     def test_bad_requests(self):
@@ -323,7 +326,7 @@ class TokenTests(SimpleTestCase):
         self.assertEqual((token.ad_id, token.viewer, token.placement, token.issued),
                          (self.AD_ID, tokens.viewer_key(1), Placement.SEARCH, 1_800_000_000))
         self.assertEqual(token.context, tokens.context_hash(Placement.SEARCH, QUERY))
-        self.assertEqual(len(value), 94)
+        self.assertEqual(len(value), 104)
         self.assertNotEqual(self.issue(now=1_800_000_000), value)  # nonce — каждый токен уникален
 
     def test_forgery(self):
@@ -1098,3 +1101,328 @@ class BotPlacementTests(ServingBase):
         self.flush()
         stat = self.stat(ad)
         self.assertEqual((stat.views, stat.clicks, stat.spent), (1, 1, Decimal('1')))
+
+
+GAZETA_ID, OTHER_ID = -1001000000003, -1001000000009  # канал gazeta и канал, которого нет в TelegramPeer
+BOOKS, CRYPTO, OTHER = 3, 7, 63  # id тем
+
+
+class ChannelServingBase(ServingBase):
+    """Объявления «сообщение в канале» и каналы партнёрки"""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        TelegramPeer.objects.create(username='gazeta', peer_type=TelegramPeer.PeerType.CHANNEL, telegram_id=GAZETA_ID,
+                                    title='gazeta', fetched_at=timezone.now())
+        cls.partner = make_local_user('partner')
+
+    def channel_ad(self, cpm=1000, budget='10000', **targeting):
+        """Объявление продвигает kunuz (он сам автоматически в exclude_channels)"""
+        response = create_ad(self.owner_client, Placement.CHANNEL_MESSAGE, cpm=cpm, budget=budget,
+                             targeting=targeting or {'languages': ['uz']})
+        self.assertEqual(response.status_code, 201, response.data)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(self.mod_client.post(f'/api/moderation/ads/{response.data["id"]}/approve/').status_code,
+                             200)
+        return Ad.objects.get(pk=response.data['id'])
+
+    def channel(self, channel_id, language=None, topics=(), confirmed=False, **fields):
+        return ChannelEarning.objects.create(
+            channel_id=channel_id, language_id=language, topics=list(topics),
+            owner=self.partner if confirmed else None,
+            claim_status=ChannelEarning.ClaimStatus.CONFIRMED if confirmed else ChannelEarning.ClaimStatus.UNCLAIMED,
+            **fields)
+
+    def serve_channel(self, channel_id, user_id=1):
+        body = {'placement': 'CHANNEL_MESSAGE', 'user_id': user_id, 'context': {'channel_id': channel_id}}
+        return self.client.post('/api/ads/serve/', json.dumps(body), content_type='application/json',
+                                HTTP_X_API_KEY=API_KEY)
+
+    def served_in(self, channel_id, user_id=1):
+        response = self.serve_channel(channel_id, user_id)
+        self.assertEqual(response.status_code, 200, response.content)
+        ads = response.json()['ads']
+        return tokens.decode(ads[0]['random_id']).ad_id if ads else None
+
+    def view_in(self, channel_id, user_id):
+        """Выдать в канале и прислать засчитанный показ. Возвращает (принято, отклонено)"""
+        token = self.serve_channel(channel_id, user_id).json()['ads'][0]['random_id']
+        return self.sent(user_id, self.view(token))
+
+
+class ChannelPlacementTests(ChannelServingBase):
+    """Кто подходит: «список каналов» и «языки + темы», исключения, свой канал, формат ответа"""
+
+    def test_specific_channels_mode(self):
+        ad = self.channel_ad(channels=['daryo'])
+        self.channel(GAZETA_ID, language='uz')  # по языку подошёл бы, но режим — список каналов
+        self.reload()
+        self.assertEqual(self.served_in(DARYO_ID), str(ad.pk))
+        self.assertEqual(self.served_in(str(DARYO_ID)), str(ad.pk))  # строкой тоже можно
+        self.assertIsNone(self.served_in(GAZETA_ID))
+        self.assertIsNone(self.served_in(OTHER_ID))
+
+    def test_languages_mode(self):
+        ad = self.channel_ad(languages=['uz', 'ru'])
+        self.channel(DARYO_ID, language='uz', topics=[BOOKS])
+        self.channel(GAZETA_ID, language='ru')  # без тем — тоже подходит
+        self.channel(OTHER_ID, language='en', topics=[BOOKS])
+        self.reload()
+        self.assertEqual(self.served_in(DARYO_ID), str(ad.pk))
+        self.assertEqual(self.served_in(GAZETA_ID), str(ad.pk))
+        self.assertIsNone(self.served_in(OTHER_ID))  # язык не тот
+
+    def test_topics_and_exclude_topics(self):
+        ad = self.channel_ad(languages=['uz'], topics=[SPORTS, BOOKS], exclude_topics=[CRYPTO])
+        self.channel(DARYO_ID, language='uz', topics=[SPORTS])
+        self.channel(GAZETA_ID, language='uz', topics=[OTHER])  # темы не пересекаются
+        self.channel(OTHER_ID, language='uz', topics=[BOOKS, CRYPTO])  # подошла бы, но есть исключённая тема
+        self.channel(-1001000000010, language='uz')  # без тем, а объявление темы выбрало
+        self.reload()
+        self.assertEqual(self.served_in(DARYO_ID), str(ad.pk))
+        for channel_id in (GAZETA_ID, OTHER_ID, -1001000000010):
+            self.assertIsNone(self.served_in(channel_id), channel_id)
+
+    def test_channel_without_meta(self):
+        by_language = self.channel_ad(languages=['uz'])
+        by_list = self.channel_ad(channels=['gazeta'], cpm=1500)
+        self.channel(DARYO_ID)  # в партнёрке, но без языка
+        self.reload()
+        self.assertIsNone(self.served_in(DARYO_ID))   # без языка в «языки + темы» не попадает
+        self.assertIsNone(self.served_in(OTHER_ID))   # канала нет в партнёрке совсем
+        self.assertEqual(self.served_in(GAZETA_ID), str(by_list.pk))  # явный выбор работает и без метаданных
+        self.assertIsNotNone(by_language)
+
+    def test_exclude_channels_and_own_channel(self):
+        ad = self.channel_ad(languages=['uz'], exclude_channels=['daryo'])
+        for channel_id in (DARYO_ID, GAZETA_ID, KUNUZ_ID):
+            self.channel(channel_id, language='uz')
+        self.reload()
+        self.assertIsNone(self.served_in(DARYO_ID))   # исключён
+        self.assertIsNone(self.served_in(KUNUZ_ID))   # реклама kunuz не показывается в самом kunuz
+        self.assertEqual(self.served_in(GAZETA_ID), str(ad.pk))
+        # Даже если автоисключение из таргетинга убрали — выдача сверяет id продвигаемого канала
+        targeting = dict(ad.targeting, exclude_channels=[])
+        Ad.objects.filter(pk=ad.pk).update(targeting=targeting)
+        self.reload()
+        self.assertIsNone(self.served_in(KUNUZ_ID))
+        self.assertEqual(self.served_in(DARYO_ID), str(ad.pk))
+
+    def test_bad_channel_id(self):
+        self.channel_ad()
+        self.reload()
+        for bad in ('', 'abc', 123, -1001, '-1001', '-2001000000002', '1001000000002', True, None, 1.5,
+                    '-100' + '1' * 14, [DARYO_ID]):
+            self.assertEqual(self.serve_channel(bad).status_code, 400, bad)
+        self.assertEqual(self.serve_channel(' -1001000000002 ').status_code, 200)
+
+    def test_response_media_picture_and_token(self):
+        ad = self.channel_ad(channels=['daryo'])
+        media = AdMedia.objects.create(user=self.owner, file='ads/media/x.mp4', media_type=AdMedia.MediaType.VIDEO,
+                                       width=1280, height=720, duration=Decimal('12.50'), status=AdMedia.Status.READY)
+        Ad.objects.filter(pk=ad.pk).update(media=media)
+        self.reload()
+        item = self.serve_channel(DARYO_ID).json()['ads'][0]
+        self.assertEqual(item['media'], {'type': 'VIDEO', 'url': 'http://testserver/media/ads/media/x.mp4',
+                                         'width': 1280, 'height': 720, 'duration': '12.50'})
+        self.assertEqual((item['placement'], item['button_type'], item['promoted']['avatar_url']),
+                         (Placement.CHANNEL_MESSAGE, 'CHANNEL', None))
+        self.assertEqual(len(item['random_id']), 104)
+        self.assertEqual(tokens.decode(item['random_id']).channel_id, DARYO_ID)  # канал — в токене
+
+        TelegramPeer.objects.filter(username='kunuz').update(avatar='tg_avatars/kunuz_abcd1234.jpg')
+        Ad.objects.filter(pk=ad.pk).update(media=None, show_channel_picture=True)
+        self.reload()
+        item = self.serve_channel(DARYO_ID).json()['ads'][0]
+        self.assertEqual(item['promoted']['avatar_url'], 'http://testserver/media/tg_avatars/kunuz_abcd1234.jpg')
+
+    def test_zero_sql(self):
+        self.channel_ad(languages=['uz'])
+        self.channel(DARYO_ID, language='uz', confirmed=True)
+        self.reload()
+        with self.assertNumQueries(0):
+            token = self.serve_channel(DARYO_ID).json()['ads'][0]['random_id']
+            self.assertEqual(self.sent(1, self.view(token), self.click(token)), (2, 0))
+
+
+class PartnerEarningTests(ChannelServingBase):
+    """Заработок партнёра: только оплаченные показы в подтверждённом канале, точно, без задвоения"""
+
+    def earning(self, channel_id):
+        return ChannelEarning.objects.get(channel_id=channel_id)
+
+    def test_only_paid_views_in_confirmed_channel(self):
+        ad = self.channel_ad(cpm=1001, languages=['uz'])
+        Ad.objects.filter(pk=ad.pk).update(views_per_user_per_day=0)
+        self.channel(DARYO_ID, language='uz', confirmed=True)   # партнёр, доля по умолчанию 0.5
+        self.channel(GAZETA_ID, language='uz')                  # не подтверждён — без заработка
+        self.reload()
+        for user_id in (1, 2, 3):
+            self.assertEqual(self.view_in(DARYO_ID, user_id), (1, 0))
+        self.assertEqual(self.view_in(GAZETA_ID, 4), (1, 0))
+        self.sent(1, self.click(self.token(ad)))  # клики бесплатные — заработка нет
+        self.flush()
+
+        ad = self.fresh(ad)
+        self.assertEqual(ad.spent, Decimal('4.004'))  # 4 платных показа × 1,001
+        daryo = self.earning(DARYO_ID)
+        # 3 × 1,001 × 0,5 = 1,5015 — точно, без округления
+        self.assertEqual((daryo.available, daryo.total_earned, daryo.total_impressions),
+                         (Decimal('1.5015'), Decimal('1.5015'), 3))
+        self.assertEqual((self.earning(GAZETA_ID).total_earned, self.earning(GAZETA_ID).total_impressions),
+                         (Decimal('0'), 0))
+        accrual = EarningTransaction.objects.get(channel=daryo, ad=ad)
+        self.assertEqual((accrual.kind, accrual.amount, accrual.impressions, accrual.order),
+                         (EarningTransaction.Kind.ACCRUAL, Decimal('1.5015'), 3, None))
+
+    def test_free_views_earn_nothing(self):
+        ad = self.channel_ad(cpm=5_000_000, languages=['uz'])  # 5000 сумов за показ — бюджета на 2
+        Ad.objects.filter(pk=ad.pk).update(views_per_user_per_day=0)
+        self.channel(DARYO_ID, language='uz', confirmed=True)
+        self.reload()
+        for user_id in (1, 2, 3):
+            # Токены как из выдачи в канале daryo (после конца бюджета выдача объявление уже не отдаёт)
+            token = tokens.issue(str(ad.pk), tokens.viewer_key(user_id), Placement.CHANNEL_MESSAGE, b'\0' * 8,
+                                 channel_id=DARYO_ID)
+            self.assertEqual(self.sent(user_id, self.view(token)), (1, 0))  # третий — бесплатный
+        self.flush()
+        daryo = self.earning(DARYO_ID)
+        self.assertEqual((daryo.total_earned, daryo.total_impressions), (Decimal('5000'), 2))  # 2 × 5000 × 0,5
+        self.assertEqual(self.stat(ad).free_views, 1)
+
+    def test_channel_share_rate_and_accumulation(self):
+        ad = self.channel_ad(cpm=1001, languages=['uz'])
+        Ad.objects.filter(pk=ad.pk).update(views_per_user_per_day=0)
+        self.channel(DARYO_ID, language='uz', confirmed=True, share_rate=Decimal('0.333'))
+        self.reload()
+        self.view_in(DARYO_ID, 1)
+        self.flush()
+        self.view_in(DARYO_ID, 2)
+        self.flush()  # вторая пачка добавляется в тот же агрегат (канал, объявление)
+        daryo = self.earning(DARYO_ID)
+        self.assertEqual(daryo.total_earned, Decimal('0.666666'))  # 2 × 1,001 × 0,333
+        accrual = EarningTransaction.objects.get(channel=daryo, ad=ad)
+        self.assertEqual((accrual.amount, accrual.impressions), (Decimal('0.666666'), 2))
+        self.assertEqual(EarningTransaction.objects.count(), 1)
+
+    def test_share_rate_with_too_many_digits(self):
+        with override_settings(PARTNER_SHARE_RATE='0.55555'), self.assertLogs('apps.ads.serving.snapshot', 'ERROR'):
+            self.assertEqual(snapshot.share_permille(settings.PARTNER_SHARE_RATE), 555)  # вниз до 3 знаков
+        self.assertEqual(snapshot.share_permille('0.5'), 500)
+        self.assertEqual(snapshot.share_permille(Decimal('1')), 1000)
+
+    def test_rerun_after_crash_does_not_double_earning(self):
+        ad = self.channel_ad(languages=['uz'])
+        Ad.objects.filter(pk=ad.pk).update(views_per_user_per_day=0)
+        self.channel(DARYO_ID, language='uz', confirmed=True)
+        self.reload()
+        self.view_in(DARYO_ID, 1)
+        self.view_in(DARYO_ID, 2)
+        with patch.object(flushing, '_cleanup'):  # «упали» после коммита — ключи пачки остались
+            self.flush()
+        batch_id = self.r.zrange(S.BATCHES, 0, -1)[0]
+        self.r.zadd(S.BATCHES, {batch_id: time.time() - 120})
+        self.flush()
+        daryo = self.earning(DARYO_ID)
+        self.assertEqual((daryo.total_earned, daryo.total_impressions), (Decimal('1'), 2))
+        self.assertEqual(EarningTransaction.objects.get(channel=daryo, ad=ad).amount, Decimal('1'))
+        self.assert_redis_clean()
+
+    def test_block_records_unflushed_earning(self):
+        ad = self.channel_ad(languages=['uz'])
+        self.channel(DARYO_ID, language='uz', confirmed=True)
+        self.reload()
+        self.view_in(DARYO_ID, 1)  # не сброшено
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.mod_client.post(f'/api/moderation/ads/{ad.pk}/block/', {'reason': 'x'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(self.earning(DARYO_ID).total_earned, Decimal('0.5'))
+        self.assertEqual(self.fresh(ad).spent, Decimal('1'))
+
+    def test_money_format_in_partner_api(self):
+        self.channel(DARYO_ID, language='uz', confirmed=True)
+        ChannelEarning.objects.filter(channel_id=DARYO_ID).update(available=Decimal('12.35'),
+                                                                 total_earned=Decimal('1.5015'))
+        item = client_for(self.partner).get('/api/partner/my/').data['results'][0]
+        self.assertEqual((item['available'], item['total_earned']), ('12.35', '1.5015'))
+        self.assertEqual((item['language'], item['topics'], item['meta_locked']), ('uz', [], False))
+
+
+class ChannelMetaTests(ChannelServingBase):
+    """Язык и темы канала: владелец — свой подтверждённый канал, модератор — любой, выдача обновляется"""
+
+    def owner_patch(self, channel_id, data, user=None):
+        return client_for(user or self.partner).patch(f'/api/partner/channels/{channel_id}/', data, format='json')
+
+    def mod_patch(self, channel_id, data):
+        return self.mod_client.patch(f'/api/moderation/channels/{channel_id}/', data, format='json')
+
+    def test_owner_sets_meta_of_own_confirmed_channel_only(self):
+        self.channel(DARYO_ID, confirmed=True)
+        self.channel(GAZETA_ID)  # не заявлен
+        response = self.owner_patch(DARYO_ID, {'language': 'uz', 'topics': [SPORTS, BOOKS]})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual((response.data['language'], response.data['topics']), ('uz', [SPORTS, BOOKS]))
+        daryo = ChannelEarning.objects.get(channel_id=DARYO_ID)
+        self.assertEqual((daryo.meta_updated_by, daryo.meta_updated_role), (self.partner, 'OWNER'))
+        self.assertEqual(self.owner_patch(DARYO_ID, {'topics': [OTHER]}).data['language'], 'uz')  # можно по одному
+
+        self.assertEqual(self.owner_patch(GAZETA_ID, {'language': 'uz'}).status_code, 404)  # не заявлен
+        self.assertEqual(self.owner_patch(DARYO_ID, {'language': 'uz'}, user=self.owner).status_code, 404)  # чужой
+        self.assertEqual(self.owner_patch(OTHER_ID, {'language': 'uz'}).status_code, 404)
+
+    def test_validation(self):
+        self.channel(DARYO_ID, confirmed=True)
+        for data in ({}, {'language': 'xx'}, {'topics': []}, {'topics': [1, 2, 3, 4]}, {'topics': [999]},
+                     {'topics': 'sport'}, {'language': None}):
+            self.assertEqual(self.owner_patch(DARYO_ID, data).status_code, 400, data)
+        self.assertEqual(self.owner_patch(DARYO_ID, {'topics': [SPORTS, SPORTS]}).data['topics'], [SPORTS])
+
+    def test_moderator_fixes_and_owner_is_locked(self):
+        self.channel(DARYO_ID, language='ru', confirmed=True)
+        response = self.mod_patch(DARYO_ID, {'language': 'uz', 'topics': [SPORTS]})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual((response.data['meta_updated_role'], response.data['meta_updated_by']),
+                         ('MODERATOR', self.moderator.username))
+        response = self.owner_patch(DARYO_ID, {'language': 'ru'})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data['error'],
+                         'Язык и темы проверены модератором, для изменения обратитесь в поддержку')
+        self.assertEqual(ChannelEarning.objects.get(channel_id=DARYO_ID).language_id, 'uz')
+        self.assertTrue(client_for(self.partner).get('/api/partner/my/').data['results'][0]['meta_locked'])
+        self.assertEqual(self.mod_patch(DARYO_ID, {'topics': [BOOKS]}).status_code, 200)  # модератор — может
+
+    def test_moderator_list_and_permissions(self):
+        self.channel(DARYO_ID, language='uz', topics=[SPORTS], confirmed=True)
+        self.channel(GAZETA_ID, language='uz')       # без тем
+        self.channel(OTHER_ID, topics=[SPORTS])      # без языка
+
+        def ids(query=''):
+            results = self.mod_client.get(f'/api/moderation/channels/{query}').data['results']
+            return {item['channel_id'] for item in results}
+        self.assertEqual(ids(), {DARYO_ID, GAZETA_ID, OTHER_ID})
+        self.assertEqual(ids('?missing_meta=1'), {GAZETA_ID, OTHER_ID})
+        self.assertEqual(ids('?claim_status=CONFIRMED'), {DARYO_ID})
+        self.assertEqual(client_for(self.partner).get('/api/moderation/channels/').status_code, 403)
+        self.assertEqual(client_for(self.partner).patch(f'/api/moderation/channels/{DARYO_ID}/', {'language': 'ru'},
+                                                        format='json').status_code, 403)
+        self.assertEqual(self.mod_patch(-1001999999999, {'language': 'uz'}).status_code, 404)
+        # Свой канал модератор не правит
+        self.channel(-1001000000020)
+        ChannelEarning.objects.filter(channel_id=-1001000000020).update(owner=self.moderator)
+        self.assertEqual(self.mod_patch(-1001000000020, {'language': 'uz'}).status_code, 403)
+
+    def test_meta_change_updates_serving(self):
+        ad = self.channel_ad(languages=['uz'], topics=[SPORTS])
+        self.channel(DARYO_ID, confirmed=True)
+        self.reload()
+        self.assertIsNone(self.served_in(DARYO_ID))
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(self.owner_patch(DARYO_ID, {'language': 'uz', 'topics': [SPORTS]}).status_code, 200)
+        snapshot.refresh_if_needed()  # версия снимка выросла — перечитываем
+        self.assertEqual(self.served_in(DARYO_ID), str(ad.pk))
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(self.mod_patch(DARYO_ID, {'topics': [BOOKS]}).status_code, 200)
+        snapshot.refresh_if_needed()
+        self.assertIsNone(self.served_in(DARYO_ID))

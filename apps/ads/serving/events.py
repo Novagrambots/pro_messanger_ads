@@ -5,6 +5,7 @@ view засчитывается, если клиент видел объявле
 токена → отказ; зрителю сегодня показали лимит → отказ; иначе списание цены (если есть остаток
 и дневной лимит позволяет) или бесплатный показ. Объявление уже не ACTIVE (нет в снимке) —
 показ бесплатный. click — бесплатно; повтор того же зрителя по тому же объявлению за 5 с не считается.
+Оплаченный показ в подтверждённом канале партнёрки — ещё и доля партнёру (в том же Lua, в миллионных сума).
 """
 import math
 
@@ -41,13 +42,18 @@ def _prepare(store, event, viewer, snapshot, day, now):
         if not _view_seen_enough(event):
             return None
         entry = snapshot.ads.get(ad_id)
+        partner = ['', 0]
         if entry is not None:
             limits = [entry.freq_limit, 1, entry.price, entry.daily_limit]
+            meta = snapshot.channels.get(token.channel_id) if token.channel_id else None
+            if meta is not None and meta.partner_permille:
+                # Цена в тысячных × доля в тысячных = миллионные сума — точно, без округления
+                partner = [token.channel_id, entry.price * meta.partner_permille]
         else:
             limits = [0, 0, 0, -1]  # не ACTIVE — бесплатно и без проверки частоты
         keys = [S.event_key(token.nonce, 'v'), S.freq_key(viewer, day), S.budget_key(ad_id),
                 S.daily_key(ad_id, day), S.delta_key(ad_id), S.DIRTY, S.STOP]
-        return store.view, keys, [ttl, ad_id, *limits, day, S.FREQ_TTL, S.DAILY_TTL]
+        return store.view, keys, [ttl, ad_id, *limits, day, S.FREQ_TTL, S.DAILY_TTL, *partner]
 
     if event.get('type') == 'click':
         keys = [S.event_key(token.nonce, 'c'), S.click_key(ad_id, viewer), S.delta_key(ad_id), S.DIRTY]

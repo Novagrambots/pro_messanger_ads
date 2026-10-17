@@ -15,13 +15,36 @@ from . import store as S
 from .snapshot import allowed_now
 
 
+def channel_candidates(snapshot, channel_id):
+    """
+    Сообщение в канале: объявления, выбравшие канал явно, + режим «языки + темы» — язык канала
+    в языках объявления, темы пересекаются (если заданы) и не попадают в исключённые. Канал без
+    языка в режим «языки + темы» не попадает. Для обоих режимов — без исключённых каналов
+    и без рекламы канала в нём самом.
+    """
+    found = list(snapshot.channel_ads.get(channel_id, ()))
+    meta = snapshot.channels.get(channel_id)
+    if meta is not None and meta.language:
+        for entry in snapshot.lang_ads.get(meta.language, ()):
+            rule = entry.channel_rule
+            if rule.topics and not rule.topics & meta.topics:
+                continue
+            if rule.exclude_topics & meta.topics:
+                continue
+            found.append(entry)
+    return [entry for entry in found
+            if channel_id not in entry.channel_rule.exclude_channels and entry.promoted_id != channel_id]
+
+
 def candidates_for(snapshot, placement, key):
-    """Объявления по контексту запроса: key — нормализованная фраза поиска или имя бота"""
+    """Объявления по контексту запроса: key — нормализованная фраза поиска, имя бота или id канала"""
     if placement == Placement.SEARCH:
         return snapshot.search.get(key, ())
     if placement == Placement.BOT:
         # Выбравшие этого бота + «любые боты»; бот, который сам себя продвигает, в своём чате не показывается
         return [entry for entry in (*snapshot.bots.get(key, ()), *snapshot.any_bot) if entry.promoted_username != key]
+    if placement == Placement.CHANNEL_MESSAGE:
+        return channel_candidates(snapshot, key)
     return ()
 
 

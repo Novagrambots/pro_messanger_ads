@@ -1,5 +1,6 @@
 """
 Снимок ACTIVE-объявлений в памяти процесса: запрос рекламы и события не ходят в Postgres.
+Для сообщений в каналах — ещё язык, темы и доля партнёра каждого канала из партнёрки.
 
 Фоновый поток раз в секунду сверяет версию в Redis (её повышает любое сохранение Ad) и
 перечитывает снимок при смене версии и в любом случае раз в 30 с. Самый первый запрос
@@ -11,14 +12,17 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import redis
 from django.conf import settings
 from django.db import close_old_connections, transaction
+from django.db.models import Q
 
 from apps.ads.models import Ad, AdMedia, AdStatus, Placement
 from apps.directories.models import TelegramPeer
+from apps.partner.models import ChannelEarning
 
 from . import store as S
 
@@ -37,6 +41,24 @@ def normalize_query(text):
 
 
 @dataclass(frozen=True)
+class ChannelRule:
+    """Таргетинг сообщения в канале: явный список каналов ИЛИ языки + темы (id каналов — как в Bot API)"""
+    channels: frozenset
+    languages: frozenset
+    topics: frozenset
+    exclude_topics: frozenset
+    exclude_channels: frozenset
+
+
+@dataclass(frozen=True)
+class ChannelMeta:
+    """Канал из партнёрки: язык, темы и доля партнёра в тысячных (0 — канал не подтверждён)"""
+    language: str
+    topics: frozenset
+    partner_permille: int
+
+
+@dataclass(frozen=True)
 class AdEntry:
     id: str
     placement: str
@@ -46,6 +68,8 @@ class AdEntry:
     schedule: tuple   # (часовой пояс, 7 масок часов) или None — круглосуточно
     payload: dict     # публичная часть ответа (без random_id); ссылки на файлы — относительные
     promoted_username: str  # что продвигаем (нижний регистр) — свой бот в своём чате не показывается
+    promoted_id: int        # id продвигаемого канала — реклама канала не показывается в нём самом
+    channel_rule: ChannelRule = None  # только у сообщения в канале
 
 
 def schedule_rule(schedule):
@@ -98,6 +122,30 @@ def _media(ad):
     }
 
 
+def _channel_ids(items):
+    # Каналы без числового id (резолвер без токена бота) ни с чем не совпадут
+    return frozenset(item['id'] for item in items or [] if item.get('id'))
+
+
+def channel_rule(targeting):
+    return ChannelRule(
+        channels=_channel_ids(targeting.get('channels')),
+        languages=frozenset(targeting.get('languages') or []),
+        topics=frozenset(targeting.get('topics') or []),
+        exclude_topics=frozenset(targeting.get('exclude_topics') or []),
+        exclude_channels=_channel_ids(targeting.get('exclude_channels')),
+    )
+
+
+def share_permille(rate):
+    """Доля партнёра в тысячных: 0.5 → 500. Больше 3 знаков — ошибка в лог и вниз до 3 знаков"""
+    value = Decimal(str(rate)) * 1000
+    whole = int(value)
+    if value != whole:
+        logger.error('Доля партнёра %s — больше 3 знаков после запятой, считаем %s', rate, Decimal(whole) / 1000)
+    return max(0, min(whole, 1000))
+
+
 def make_entry(ad):
     promoted = _promoted(ad)
     payload = {
@@ -119,6 +167,8 @@ def make_entry(ad):
         schedule=schedule_rule(ad.schedule),
         payload=payload,
         promoted_username=promoted['username'].lower(),
+        promoted_id=promoted['telegram_id'] if promoted['type'] == TelegramPeer.PeerType.CHANNEL else None,
+        channel_rule=channel_rule(ad.targeting or {}) if ad.placement == Placement.CHANNEL_MESSAGE else None,
     )
 
 
@@ -127,11 +177,12 @@ def _by_price(entries):
 
 
 class Snapshot:
-    def __init__(self, ads, version):
+    def __init__(self, ads, version, channels=None):
         self.version = version
         self.loaded_at = time.monotonic()
         self.ads = {}
-        search, bots, any_bot = {}, {}, []
+        self.channels = channels or {}  # channel_id → ChannelMeta
+        search, bots, any_bot, channel_ads, lang_ads = {}, {}, [], {}, {}
         for ad in ads:
             entry = make_entry(ad)
             self.ads[entry.id] = entry
@@ -145,10 +196,34 @@ class Snapshot:
                     bots.setdefault(name, []).append(entry)
                 if not names:
                     any_bot.append(entry)  # боты не выбраны — показываем в любых
-        # Фраза / имя бота → объявления по убыванию ставки
+            elif ad.placement == Placement.CHANNEL_MESSAGE:
+                rule = entry.channel_rule
+                if rule.channels:  # режим «список каналов»
+                    for channel_id in rule.channels:
+                        channel_ads.setdefault(channel_id, []).append(entry)
+                else:  # режим «языки + темы»
+                    for language in rule.languages:
+                        lang_ads.setdefault(language, []).append(entry)
+        # Фраза / имя бота / канал / язык → объявления по убыванию ставки
         self.search = {phrase: _by_price(entries) for phrase, entries in search.items()}
         self.bots = {name: _by_price(entries) for name, entries in bots.items()}
         self.any_bot = _by_price(any_bot)
+        self.channel_ads = {channel_id: _by_price(entries) for channel_id, entries in channel_ads.items()}
+        self.lang_ads = {language: _by_price(entries) for language, entries in lang_ads.items()}
+
+
+def load_channels():
+    """Каналы партнёрки, нужные выдаче: с языком (режим «языки + темы») или подтверждённые (заработок)"""
+    confirmed = ChannelEarning.ClaimStatus.CONFIRMED
+    default = share_permille(settings.PARTNER_SHARE_RATE)
+    rows = ChannelEarning.objects.filter(Q(language__isnull=False) | Q(claim_status=confirmed)).values_list(
+        'channel_id', 'language_id', 'topics', 'claim_status', 'owner_id', 'share_rate')
+    channels = {}
+    for channel_id, language, topics, claim_status, owner_id, rate in rows:
+        partner = claim_status == confirmed and owner_id is not None
+        permille = (share_permille(rate) if rate is not None else default) if partner else 0
+        channels[channel_id] = ChannelMeta(language, frozenset(topics or []), permille)
+    return channels
 
 
 def load():
@@ -162,7 +237,7 @@ def load():
         pairs += [str(ad.pk), S.to_thousandths(ad.remaining_budget())]
     for start in range(0, len(pairs), _SETNX_CHUNK):
         s.setnx_budgets(args=[S.PREFIX, *pairs[start:start + _SETNX_CHUNK]])
-    return Snapshot(ads, version)
+    return Snapshot(ads, version, load_channels())
 
 
 _current = None

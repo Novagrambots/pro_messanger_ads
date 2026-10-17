@@ -13,14 +13,18 @@ SERVE_REQUEST = {
     'required': ['placement', 'user_id'],
     'properties': {
         'placement': {'type': 'string', 'enum': list(Placement.values),
-                      'description': 'Место показа. Работают SEARCH и BOT, остальные пока отдают пустой список'},
+                      'description': 'Место показа. Работают SEARCH, BOT и CHANNEL_MESSAGE, '
+                                     'остальные пока отдают пустой список'},
         'user_id': USER_ID,
         'context': {'type': 'object',
                     'description': 'SEARCH: {"query": "строка поиска"}; '
-                                   'BOT: {"bot_username": "имя бота, в чате которого плашка"}',
+                                   'BOT: {"bot_username": "имя бота, в чате которого плашка"}; '
+                                   'CHANNEL_MESSAGE: {"channel_id": -1001234567890}',
                     'properties': {
                         'query': {'type': 'string', 'maxLength': 256},
                         'bot_username': {'type': 'string', 'description': 'Без @ или с @, регистр не важен'},
+                        'channel_id': {'type': 'integer', 'format': 'int64',
+                                       'description': 'id канала, где показываем, в формате Bot API (-100…)'},
                     }},
         'lang': {'type': 'string', 'maxLength': 64},
         'platform': {'type': 'string', 'maxLength': 64},
@@ -66,7 +70,7 @@ AD = {
 SERVE_RESPONSE = {
     'type': 'object',
     'properties': {
-        'ads': {'type': 'array', 'items': AD, 'description': 'Поиск и боты — не больше одного объявления'},
+        'ads': {'type': 'array', 'items': AD, 'description': 'Сейчас — не больше одного объявления'},
         'ttl_seconds': {'type': 'integer', 'description': 'Сколько клиент кэширует ответ'},
     },
 }

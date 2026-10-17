@@ -54,7 +54,10 @@ def click_key(ad_id, viewer):
 
 
 def delta_key(ad_id):
-    """Несброшенные дельты: поля «<день>:v|fv|c|s» (показы, бесплатные показы, клики, потрачено)"""
+    """
+    Несброшенные дельты: поля «<день>:v|fv|c|s» (показы, бесплатные показы, клики, потрачено в тысячных)
+    и «p:<канал>» / «pv:<канал>» (заработок партнёра в миллионных сума / оплаченные показы в канале)
+    """
     return f'{PREFIX}delta:{ad_id}'
 
 
@@ -98,7 +101,8 @@ def to_thousandths(amount):
 
 # ============================================ Lua ============================================
 
-# Событие view. Ответ: 1 — списали, 2 — бесплатный показ, 0 — дубль токена, -1 — частота исчерпана
+# Событие view. Ответ: 1 — списали, 2 — бесплатный показ, 0 — дубль токена, -1 — частота исчерпана.
+# ARGV[10], ARGV[11] — канал партнёра ('' — нет) и его доля за этот показ в миллионных сума
 VIEW_LUA = """
 if not redis.call('SET', KEYS[1], 1, 'NX', 'EX', ARGV[1]) then return 0 end
 local limit = tonumber(ARGV[3])
@@ -119,6 +123,10 @@ if ARGV[4] == '1' then
       redis.call('EXPIRE', KEYS[4], ARGV[9])
       redis.call('HINCRBY', KEYS[5], day .. ':v', 1)
       redis.call('HINCRBY', KEYS[5], day .. ':s', price)
+      if ARGV[10] ~= '' then
+        redis.call('HINCRBY', KEYS[5], 'p:' .. ARGV[10], ARGV[11])
+        redis.call('HINCRBY', KEYS[5], 'pv:' .. ARGV[10], 1)
+      end
       redis.call('SADD', KEYS[6], ARGV[2])
       if left < price then redis.call('SADD', KEYS[7], ARGV[2]) end
       return 1

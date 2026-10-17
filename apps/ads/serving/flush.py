@@ -9,6 +9,9 @@
 
 Заморозка (freeze) — под локом объявления перед refund() и при пополнении: снять ключ бюджета
 (новые показы — бесплатные) и записать все несброшенные дельты объявления в той же транзакции.
+
+Заработок каналов-партнёров едет в тех же дельтах объявления и пишется в той же транзакции:
+ChannelEarning += и агрегат EarningTransaction на пару (канал, объявление).
 """
 import logging
 import time
@@ -22,6 +25,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from apps.ads.models import Ad, AdDailyStat, AdStatus, FlushBatch
+from apps.partner.models import ChannelEarning, EarningTransaction
 
 from . import store as S
 
@@ -81,29 +85,38 @@ def _apply_locked(batch_id, ad_ids):
     pipe = S.store().redis.pipeline(transaction=False)
     for ad_id in ad_ids:
         pipe.hgetall(S.flush_key(batch_id, ad_id))
-    rows = []
+    rows, partner_rows = [], []
     for ad_id, fields in zip(ad_ids, pipe.execute()):
         ad = ads.get(ad_id)
         if ad is None or not fields:
             continue
-        per_day = _parse_delta(fields)
+        per_day, partners = _parse_delta(fields)
+        # При обрезке трат (аномалия) заработок партнёра не трогаем: показы были, ошибка — платформы
         spent = _clamp_to_budget(ad, per_day)
         if spent:
             Ad.objects.filter(pk=ad.pk).update(spent=F('spent') + spent)
         rows += [(ad.pk, day, d['v'], d['fv'], d['c'], Decimal(d['s']) / 1000) for day, d in per_day.items()]
+        partner_rows += [(ad.pk, channel_id, *earned) for channel_id, earned in partners.items()]
     _upsert_stats(rows)
+    _accrue_partners(partner_rows)
     FlushBatch.objects.create(id=batch_id, ads_count=len(ad_ids))
     return len(ads)
 
 
 def _parse_delta(fields):
-    """{'20261017:v': '3', ...} → {date: {'v': 3, 'fv': 0, 'c': 0, 's': 3000}}"""
-    per_day = {}
+    """
+    {'20261017:v': '3', 'p:-100…': '1500000', 'pv:-100…': '3', ...} →
+    ({date: {'v': 3, 'fv': 0, 'c': 0, 's': 3000}}, {channel_id: [миллионные сума, оплаченные показы]})
+    """
+    per_day, partners = {}, {}
     for field, value in fields.items():
-        day, kind = field.split(':')
-        counters = per_day.setdefault(datetime.strptime(day, '%Y%m%d').date(), {'v': 0, 'fv': 0, 'c': 0, 's': 0})
-        counters[kind] += int(value)
-    return per_day
+        prefix, rest = field.split(':', 1)
+        if prefix in ('p', 'pv'):
+            partners.setdefault(int(rest), [0, 0])[0 if prefix == 'p' else 1] += int(value)
+            continue
+        counters = per_day.setdefault(datetime.strptime(prefix, '%Y%m%d').date(), {'v': 0, 'fv': 0, 'c': 0, 's': 0})
+        counters[rest] += int(value)
+    return per_day, partners
 
 
 def _clamp_to_budget(ad, per_day):
@@ -149,6 +162,46 @@ def _upsert_stats(rows):
            f'clicks = {table}.clicks + EXCLUDED.clicks, spent = {table}.spent + EXCLUDED.spent')
     with connection.cursor() as cursor:
         cursor.execute(sql, [value for row in rows for value in row])
+
+
+def _accrue_partners(rows):
+    """
+    Заработок каналов за пачку: rows — (ad_pk, channel_id, миллионные сума, показы).
+    ChannelEarning += (F-выражения) и EarningTransaction на пару (канал, объявление) — одним upsert.
+    Каналы обновляем по возрастанию pk: сброс и заморозка не ловят deadlock на общих каналах.
+    """
+    if not rows:
+        return
+    channel_pks = dict(ChannelEarning.objects.filter(channel_id__in={row[1] for row in rows})
+                       .values_list('channel_id', 'pk'))
+    now = timezone.now()
+    totals, transactions = {}, []
+    for ad_pk, channel_id, millionths, views in rows:
+        pk = channel_pks.get(channel_id)
+        if pk is None:
+            logger.error('Заработок канала %s не записан: канала нет в партнёрке', channel_id)
+            continue
+        amount = Decimal(millionths) / 1_000_000
+        total = totals.setdefault(pk, [Decimal('0'), 0])
+        total[0] += amount
+        total[1] += views
+        transactions.append((pk, ad_pk, EarningTransaction.Kind.ACCRUAL.value, amount, views, now, now))
+    for pk in sorted(totals):
+        amount, views = totals[pk]
+        ChannelEarning.objects.filter(pk=pk).update(
+            available=F('available') + amount, total_earned=F('total_earned') + amount,
+            total_impressions=F('total_impressions') + views, updated_at=now)
+    if not transactions:
+        return
+    transactions.sort(key=lambda row: (row[0], str(row[1])))
+    table = connection.ops.quote_name(EarningTransaction._meta.db_table)
+    values = ', '.join(['(%s, %s, %s, %s, %s, %s, %s)'] * len(transactions))
+    sql = (f'INSERT INTO {table} (channel_id, ad_id, kind, amount, impressions, created_at, updated_at) '
+           f'VALUES {values} ON CONFLICT (channel_id, ad_id, kind) WHERE ad_id IS NOT NULL DO UPDATE SET '
+           f'amount = {table}.amount + EXCLUDED.amount, impressions = {table}.impressions + EXCLUDED.impressions, '
+           f'updated_at = EXCLUDED.updated_at')
+    with connection.cursor() as cursor:
+        cursor.execute(sql, [value for row in transactions for value in row])
 
 
 def _cleanup(batch_id, ad_ids):

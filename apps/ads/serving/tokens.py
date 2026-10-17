@@ -4,9 +4,10 @@ viewer_key и random_id.
 viewer_key = HMAC-SHA256(VIEWER_HASH_SECRET, user_id), первые 16 байт в hex. Сырой user_id
 нигде не хранится и не логируется — дальше вьюхи идёт только viewer_key.
 
-random_id — подписанный токен показа (base64url, 94 символа):
-версия (1) + ad (16) + viewer (16) + место показа (1) + хэш контекста (8) + время выдачи (4)
-+ nonce (8) + HMAC-SHA256(ADS_TOKEN_SECRET)[:16]. Живёт ADS_TOKEN_TTL (1 час).
+random_id — подписанный токен показа (base64url, 104 символа):
+версия (1) + ad (16) + viewer (16) + место показа (1) + хэш контекста (8) + канал (8, 0 — нет)
++ время выдачи (4) + nonce (8) + HMAC-SHA256(ADS_TOKEN_SECRET)[:16]. Живёт ADS_TOKEN_TTL (1 час).
+Канал — id канала, где показали (сообщение в канале): по нему начисляется заработок партнёру.
 """
 import base64
 import binascii
@@ -33,7 +34,7 @@ PLACEMENT_CODES = {
 }
 CODE_PLACEMENTS = {code: placement for placement, code in PLACEMENT_CODES.items()}
 
-_BODY = struct.Struct('>B16s16sB8sI8s')  # 54 байта
+_BODY = struct.Struct('>B16s16sB8sqI8s')  # 62 байта
 _MAC_SIZE = 16
 _TOKEN_SIZE = _BODY.size + _MAC_SIZE
 MAX_CLOCK_SKEW = 60  # токен «из будущего» больше чем на минуту — подделка
@@ -72,6 +73,7 @@ class Token:
     viewer: str
     placement: str
     context: bytes
+    channel_id: int  # где показали (сообщение в канале), иначе None
     issued: int
     nonce: str
 
@@ -85,11 +87,11 @@ def _mac(body):
     return hmac.new(settings.ADS_TOKEN_SECRET.encode(), body, hashlib.sha256).digest()[:_MAC_SIZE]
 
 
-def issue(ad_id, viewer, placement, ctx_hash, now=None):
-    """Новый random_id для показа объявления ad_id зрителю viewer"""
+def issue(ad_id, viewer, placement, ctx_hash, now=None, channel_id=None):
+    """Новый random_id для показа объявления ad_id зрителю viewer (channel_id — в каком канале)"""
     issued = int(now if now is not None else time.time())
     body = _BODY.pack(TOKEN_VERSION, uuid.UUID(ad_id).bytes, bytes.fromhex(viewer),
-                      PLACEMENT_CODES[placement], ctx_hash, issued, os.urandom(8))
+                      PLACEMENT_CODES[placement], ctx_hash, channel_id or 0, issued, os.urandom(8))
     return base64.urlsafe_b64encode(body + _mac(body)).rstrip(b'=').decode()
 
 
@@ -106,10 +108,11 @@ def decode(value, now=None):
     body, mac = raw[:_BODY.size], raw[_BODY.size:]
     if not hmac.compare_digest(mac, _mac(body)):
         return None
-    version, ad_bytes, viewer_bytes, code, ctx, issued, nonce = _BODY.unpack(body)
+    version, ad_bytes, viewer_bytes, code, ctx, channel_id, issued, nonce = _BODY.unpack(body)
     if version != TOKEN_VERSION or code not in CODE_PLACEMENTS:
         return None
     now = int(now if now is not None else time.time())
     if issued + settings.ADS_TOKEN_TTL < now or issued > now + MAX_CLOCK_SKEW:
         return None
-    return Token(str(uuid.UUID(bytes=ad_bytes)), viewer_bytes.hex(), CODE_PLACEMENTS[code], ctx, issued, nonce.hex())
+    return Token(str(uuid.UUID(bytes=ad_bytes)), viewer_bytes.hex(), CODE_PLACEMENTS[code], ctx, channel_id or None,
+                 issued, nonce.hex())
