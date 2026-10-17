@@ -331,6 +331,7 @@ class Ad(models.Model):
         """Блокировка за нарушение: → BLOCKED, остаток возвращается. Возвращает сумму возврата"""
         self._require(AdStatus.IN_REVIEW, AdStatus.ACTIVE, AdStatus.ON_HOLD, AdStatus.STOPPED,
                       action='заблокировать')
+        self._freeze_serving()  # сначала записать показанное — иначе вернём деньги за него
         refund_amount = refund(self, MoneyOperation.Reason.BLOCK)
         self.status = AdStatus.BLOCKED
         self._set_moderation(moderator, reason)
@@ -340,10 +341,24 @@ class Ad(models.Model):
         return refund_amount
 
     def stop(self):
-        """Бюджет кончился: ACTIVE → STOPPED (будет вызывать выдача)"""
+        """Бюджет кончился: ACTIVE → STOPPED (вызывает сброс показов, apps/ads/serving/flush.py)"""
         self._require(AdStatus.ACTIVE, action='остановить')
         self.status = AdStatus.STOPPED
         self.save(update_fields=['status', 'updated_at'])
+
+    # Могло показываться: в Redis выдачи есть ключ бюджета и, возможно, несброшенные показы
+    SERVED_STATUSES = (AdStatus.ACTIVE, AdStatus.ON_HOLD, AdStatus.STOPPED)
+
+    def _freeze_serving(self):
+        """
+        Перед возвратом и пополнением: снять ключ бюджета в Redis и записать несброшенные показы
+        (spent обновится). На модерации объявление ни разу не показывалось — Redis не нужен.
+        Redis недоступен → ServingUnavailable (503), деньги не двигаются.
+        """
+        if self.status not in self.SERVED_STATUSES:
+            return None
+        from apps.ads.serving.flush import freeze
+        return freeze(self)
 
     # В каких статусах можно пополнить бюджет
     BUDGET_STATUSES = (AdStatus.IN_REVIEW, AdStatus.ACTIVE, AdStatus.ON_HOLD, AdStatus.STOPPED)
@@ -352,17 +367,24 @@ class Ad(models.Model):
         """
         Пополнение бюджета (вызывается из колбэка billing.charge, amount = оплачено + carry).
         Остановленное из-за бюджета объявление снова крутится — без повторной модерации.
+        Ключ бюджета в Redis пересчитывается из Postgres: снимается, показы записываются,
+        после коммита возвращается с новым остатком.
         """
         self._require(*self.BUDGET_STATUSES, action='пополнить бюджет')
+        mark = self._freeze_serving()
         self.budget += amount
         if self.status == AdStatus.STOPPED:
             self.status = AdStatus.ACTIVE
         self.save(update_fields=['budget', 'status', 'updated_at'])
+        if mark:
+            from apps.ads.serving.flush import restore_after_commit
+            restore_after_commit(self, mark)
 
     def soft_delete(self):
         """Мягкое удаление в любом статусе: → DELETED, точный остаток возвращается"""
         if self.status == AdStatus.DELETED:
             raise AdStateError('Объявление уже удалено')
+        self._freeze_serving()
         refund_amount = refund(self, MoneyOperation.Reason.DELETE)
         self.status = AdStatus.DELETED
         self.save(update_fields=['status', 'updated_at'])
@@ -593,3 +615,42 @@ class AdDecision(models.Model):
     def __str__(self):
         return f'{self.get_action_display()} — {self.ad.title}'
 
+
+
+class AdDailyStat(models.Model):
+    """
+    Статистика объявления за сутки (по Asia/Tashkent). Пишет только сброс показов из Redis
+    (apps/ads/serving/flush.py): INSERT ... ON CONFLICT с прибавлением дельт.
+    """
+    ad = models.ForeignKey(Ad, on_delete=models.CASCADE, related_name='daily_stats', verbose_name='Объявление')
+    date = models.DateField('Сутки')
+    views = models.PositiveIntegerField('Платные показы', default=0)
+    free_views = models.PositiveIntegerField('Бесплатные показы', default=0,
+                                             help_text='Бюджет или дневной лимит кончились, объявление уже не активно')
+    clicks = models.PositiveIntegerField('Клики', default=0)
+    spent = models.DecimalField('Потрачено', max_digits=19, decimal_places=6, default=Decimal('0'))
+
+    class Meta:
+        verbose_name = 'Статистика за сутки'
+        verbose_name_plural = 'Статистика за сутки'
+        ordering = ['-date']
+        constraints = [
+            models.UniqueConstraint(fields=['ad', 'date'], name='ad_daily_stat_unique_day'),
+        ]
+
+    def __str__(self):
+        return f'{self.ad_id} {self.date}: {self.views} показов, {self.clicks} кликов'
+
+
+class FlushBatch(models.Model):
+    """Записанная пачка сброса показов — чтобы одна пачка не попала в Postgres дважды"""
+    id = models.UUIDField(primary_key=True)
+    ads_count = models.PositiveIntegerField('Объявлений в пачке', default=0)
+    created_at = models.DateTimeField('Записана', auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = 'Пачка сброса показов'
+        verbose_name_plural = 'Пачки сброса показов'
+
+    def __str__(self):
+        return f'{self.id} ({self.ads_count})'

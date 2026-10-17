@@ -124,6 +124,14 @@ _AD_DECISION_TEXTS = {
 }
 
 
+def notify_ad_money_alert(ad, problem):
+    """Деньги объявления не сходятся (сброс показов обрезал трату) — суперадминам"""
+    User = get_user_model()
+    body = f'Объявление «{ad.title}» ({ad.pk}): {problem}'
+    for admin in User.objects.filter(is_superuser=True, is_active=True):
+        notify(admin, 'Проблема с деньгами объявления', body[:1000], Notification.Type.MONEY_ALERT, _ad_payload(ad))
+
+
 def notify_ad_decision(ad, action, reason='', revision=None):
     """Решение модератора по объявлению или его правке — владельцу"""
     notif_type, title, body_template = _AD_DECISION_TEXTS[action]

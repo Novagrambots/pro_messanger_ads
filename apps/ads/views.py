@@ -12,10 +12,11 @@ from apps.ads.media import MediaError, save_upload
 from apps.ads.models import Ad, AdMedia, AdPricing, AdStateError, AdStatus
 from apps.ads.serializers import (AdBudgetTopUpSerializer, AdCreateSerializer, AdMediaSerializer, AdPricingSerializer,
                                   AdSerializer, AdUpdateSerializer, BudgetOperationSerializer)
+from apps.ads.serving.store import ServingUnavailable
 from apps.billing.models import MoneyOperation
 from apps.billing.services import charge, format_money
 from apps.common.pagination import StandardResultsSetPagination
-from apps.common.schema import ORDER_CREATE_ERROR_RESPONSES
+from apps.common.schema import ERROR_RESPONSE, ORDER_CREATE_ERROR_RESPONSES
 
 # Ответ на недопустимое действие: {"error": "..."} или {"<поле>": "..."}
 STATE_ERROR_RESPONSE = {'type': 'object', 'additionalProperties': {'type': 'string'}}
@@ -23,6 +24,8 @@ DELETE_RESPONSE = {
     'type': 'object',
     'properties': {'message': {'type': 'string'}, 'refund_amount': {'type': 'string', 'format': 'decimal'}},
 }
+# Redis выдачи недоступен: без него нельзя записать уже показанное — деньги не двигаем
+SERVING_DOWN = 'Сервис выдачи рекламы временно недоступен, попробуйте позже'
 
 
 def own_ads(user):
@@ -88,11 +91,14 @@ class AdDetailView(generics.GenericAPIView):
         return Response(AdSerializer(ad, context={'request': request}).data,
                         status=status.HTTP_202_ACCEPTED if revision else status.HTTP_200_OK)
 
-    @extend_schema(responses={200: DELETE_RESPONSE})
+    @extend_schema(responses={200: DELETE_RESPONSE, 503: ERROR_RESPONSE})
     def delete(self, request, pk):
-        with transaction.atomic():
-            ad = get_object_or_404(self.get_queryset().select_for_update(), pk=pk)
-            refund_amount = ad.soft_delete()
+        try:
+            with transaction.atomic():
+                ad = get_object_or_404(self.get_queryset().select_for_update(), pk=pk)
+                refund_amount = ad.soft_delete()
+        except ServingUnavailable:
+            return Response({'error': SERVING_DOWN}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response({
             'message': 'Объявление удалено, остаток бюджета возвращён',
             'refund_amount': format_money(refund_amount),
@@ -120,19 +126,27 @@ class AdBudgetTopUpView(generics.GenericAPIView):
             return Response({'error': f'Нельзя пополнить бюджет: объявление в статусе «{ad.get_status_display()}»'},
                             status=status.HTTP_400_BAD_REQUEST)
 
+        def lock_ad():
+            return Ad.objects.select_for_update().get(pk=ad.pk)
+
         def add_to_ad(amount):
-            # amount = оплачено + дробный остаток прошлых возвратов (его добавляет billing)
-            locked = Ad.objects.select_for_update().get(pk=ad.pk)
+            # amount = оплачено + дробный остаток прошлых возвратов (его добавляет billing).
+            # Объявление уже под локом с начала транзакции (lock_order) — повторный лок не ждёт
+            locked = lock_ad()
             locked.add_budget(amount)
             return locked
 
         try:
+            # Сначала объявление, потом баланс — как у удаления и блокировки (иначе deadlock)
             ad = charge(request.user, serializer.validated_data['amount'], MoneyOperation.OrderType.ADS,
-                        add_to_ad, reason=MoneyOperation.Reason.TOP_UP)
+                        add_to_ad, reason=MoneyOperation.Reason.TOP_UP, lock_order=lock_ad)
         except AdStateError as exc:
             # Статус успел смениться после проверки: у локального кошелька всё откатилось,
             # у AdGram списание без объявления вернёт компенсация (через 10 минут)
             return state_error(exc)
+        except ServingUnavailable:
+            # Так же: локально откатилось, списание AdGram вернёт компенсация
+            return Response({'detail': SERVING_DOWN}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(AdSerializer(ad, context={'request': request}).data)
 
 

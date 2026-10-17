@@ -1,0 +1,219 @@
+"""
+Снимок ACTIVE-объявлений в памяти процесса: запрос рекламы и события не ходят в Postgres.
+
+Фоновый поток раз в секунду сверяет версию в Redis (её повышает любое сохранение Ad) и
+перечитывает снимок при смене версии и в любом случае раз в 30 с. Самый первый запрос
+процесса загружает снимок сам. При загрузке недостающие ключи бюджета создаются в Redis
+из Postgres (SET NX) — кроме «замороженных» на время возврата или пополнения.
+"""
+import logging
+import os
+import threading
+import time
+from dataclasses import dataclass
+from zoneinfo import ZoneInfo
+
+import redis
+from django.conf import settings
+from django.db import close_old_connections, transaction
+
+from apps.ads.models import Ad, AdMedia, AdStatus, Placement
+from apps.directories.models import TelegramPeer
+
+from . import store as S
+
+logger = logging.getLogger(__name__)
+
+CHECK_EVERY = 1.0    # проверка версии, с
+RELOAD_EVERY = 30.0  # перечитать в любом случае, с
+_SETNX_CHUNK = 1000  # пар «объявление, остаток» в одном вызове Lua
+
+_APOSTROPHES = str.maketrans({c: "'" for c in 'ʻʼ’‘`´'})
+
+
+def normalize_query(text):
+    """Фраза поиска: нижний регистр, апострофы ʻ ’ ‘ ` ʼ ´ → ', пробелы схлопнуты, края обрезаны"""
+    return ' '.join(text.translate(_APOSTROPHES).lower().split())
+
+
+@dataclass(frozen=True)
+class AdEntry:
+    id: str
+    placement: str
+    price: int        # цена показа в тысячных сума (= cpm)
+    freq_limit: int   # показов одному зрителю в сутки, 0 — без ограничений
+    daily_limit: int  # дневной лимит в тысячных сума, -1 — без лимита
+    schedule: tuple   # (часовой пояс, 7 масок часов) или None — круглосуточно
+    payload: dict     # публичная часть ответа (без random_id); ссылки на файлы — относительные
+
+
+def schedule_rule(schedule):
+    if not schedule or not schedule.get('enabled'):
+        return None
+    zone = schedule.get('timezone') or settings.TIME_ZONE
+    if zone == 'viewer':  # пояс зрителя (места показа Пользователей) — до этапа 7г считаем по Ташкенту
+        zone = settings.TIME_ZONE
+    return ZoneInfo(zone), tuple(schedule['days'])
+
+
+def allowed_now(rule, now):
+    """Расписание разрешает текущий час (маски Telegram: бит h — час h:00–h+1:00, Пн…Вс)"""
+    if rule is None:
+        return True
+    zone, days = rule
+    local = now.astimezone(zone)
+    return bool(days[local.weekday()] >> local.hour & 1)
+
+
+def _promoted(ad):
+    """Что продвигаем. У объявлений до этапа 5а нет promoted_peer — берём имя из ссылки"""
+    peer = ad.promoted_peer
+    username = peer.username if peer else ad.url.rstrip('/').rsplit('/', 1)[-1]
+    if peer and peer.peer_type in (TelegramPeer.PeerType.CHANNEL, TelegramPeer.PeerType.BOT):
+        peer_type = peer.peer_type
+    else:
+        peer_type = TelegramPeer.PeerType.BOT if username.lower().endswith('bot') else TelegramPeer.PeerType.CHANNEL
+    # В поиске карточка всегда с аватаром; в остальных местах — если выбрано «фото канала»
+    show_avatar = ad.placement == Placement.SEARCH or ad.show_channel_picture
+    return {
+        'username': username,
+        'title': peer.title if peer else '',
+        'avatar_url': peer.avatar.url if peer and peer.avatar and show_avatar else None,
+        'telegram_id': peer.telegram_id if peer else None,
+        'type': peer_type,
+    }
+
+
+def _media(ad):
+    media = ad.media
+    if media is None or media.status != AdMedia.Status.READY:
+        return None
+    return {
+        'type': media.media_type,
+        'url': media.file.url,
+        'width': media.width,
+        'height': media.height,
+        'duration': str(media.duration) if media.duration is not None else None,
+    }
+
+
+def make_entry(ad):
+    promoted = _promoted(ad)
+    payload = {
+        'placement': ad.placement,
+        'text': ad.text,
+        'url': ad.url,
+        'promoted': promoted,
+        'button_type': promoted['type'],  # CHANNEL / BOT — текст кнопки переводит клиент
+        'media': _media(ad),
+        'other_info': ad.other_info,
+        'label': 'Ad',
+    }
+    return AdEntry(
+        id=str(ad.pk),
+        placement=ad.placement,
+        price=ad.cpm,
+        freq_limit=ad.views_per_user_per_day,
+        daily_limit=ad.daily_limit * 1000 if ad.daily_limit else -1,
+        schedule=schedule_rule(ad.schedule),
+        payload=payload,
+    )
+
+
+class Snapshot:
+    def __init__(self, ads, version):
+        self.version = version
+        self.loaded_at = time.monotonic()
+        self.ads = {}
+        search = {}
+        for ad in ads:
+            entry = make_entry(ad)
+            self.ads[entry.id] = entry
+            if ad.placement == Placement.SEARCH:
+                for phrase in {normalize_query(q) for q in (ad.targeting or {}).get('queries', [])}:
+                    search.setdefault(phrase, []).append(entry)
+        # Фраза → объявления по убыванию ставки
+        self.search = {phrase: tuple(sorted(entries, key=lambda e: -e.price)) for phrase, entries in search.items()}
+
+
+def load():
+    """Читает ACTIVE-объявления из Postgres и создаёт недостающие ключи бюджета в Redis"""
+    s = S.store()
+    # Версию читаем ДО запроса в БД: изменения во время загрузки поймает следующая проверка
+    version = s.redis.get(S.VERSION)
+    ads = list(Ad.objects.filter(status=AdStatus.ACTIVE).select_related('promoted_peer', 'media'))
+    pairs = []
+    for ad in ads:
+        pairs += [str(ad.pk), S.to_thousandths(ad.remaining_budget())]
+    for start in range(0, len(pairs), _SETNX_CHUNK):
+        s.setnx_budgets(args=[S.PREFIX, *pairs[start:start + _SETNX_CHUNK]])
+    return Snapshot(ads, version)
+
+
+_current = None
+_load_lock = threading.Lock()
+_thread_pid = None
+
+
+def current():
+    """Снимок для запроса. Бросает ошибку Redis / БД, только если снимка ещё нет совсем"""
+    snapshot = _current
+    if snapshot is None:
+        with _load_lock:
+            snapshot = _current or reload()
+    if settings.ADS_SNAPSHOT_THREAD:
+        _ensure_thread()
+    return snapshot
+
+
+def reload():
+    global _current
+    _current = load()
+    return _current
+
+
+def refresh_if_needed():
+    """Одна итерация фонового потока: версия сменилась или снимку 30 с — перечитать"""
+    snapshot = _current
+    version = S.store().redis.get(S.VERSION)
+    if snapshot is None or version != snapshot.version or time.monotonic() - snapshot.loaded_at >= RELOAD_EVERY:
+        reload()
+
+
+def _run():
+    last_error = 0.0
+    while True:
+        time.sleep(CHECK_EVERY)
+        try:
+            close_old_connections()
+            refresh_if_needed()
+        except Exception:
+            # Работаем на прежнем снимке; в лог — не чаще раза в минуту
+            if time.monotonic() - last_error > 60:
+                logger.exception('Снимок объявлений не обновился — работаем на прежнем')
+                last_error = time.monotonic()
+
+
+def _ensure_thread():
+    """Поток — свой в каждом процессе (после fork потоки родителя не живут)"""
+    global _thread_pid
+    if _thread_pid == os.getpid():
+        return
+    with _load_lock:
+        if _thread_pid != os.getpid():
+            threading.Thread(target=_run, name='ads-snapshot', daemon=True).start()
+            _thread_pid = os.getpid()
+
+
+# ================================ Версия снимка ================================
+
+def ad_saved(sender, instance, **kwargs):
+    """post_save объявления: после коммита повысить версию — снимки во всех процессах перечитаются"""
+    transaction.on_commit(_bump_quietly)
+
+
+def _bump_quietly():
+    try:
+        S.bump_version()
+    except redis.RedisError:
+        logger.warning('Не удалось повысить версию снимка объявлений — перечитается по таймеру (30 с)')

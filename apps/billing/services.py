@@ -68,22 +68,28 @@ def check_budget(user, budget):
 
 # ======================================= Списание при создании заказа =======================================
 
-def charge(user, paid, order_type, create_order, reason=MoneyOperation.Reason.CREATE):
+def charge(user, paid, order_type, create_order, reason=MoneyOperation.Reason.CREATE, lock_order=None):
     """
     Списывает paid. create_order(budget) вызывается внутри нашей транзакции и возвращает
     заказ: создаёт новый (CREATE) или увеличивает бюджет существующего под select_for_update
     (TOP_UP). В бюджет уходит оплачено + carry (carry обнуляется).
 
+    lock_order() — у пополнения существующего заказа: лочит его в начале транзакции, ДО баланса.
+    Порядок блокировок везде один — заказ, потом баланс (так же идёт возврат), иначе
+    одновременные пополнение и удаление одного заказа ловят взаимную блокировку.
+
     Вызывать ВНЕ transaction.atomic: у AdGram запись PENDING должна закоммититься
     до похода в AdGram, а сам поход идёт без открытой транзакции БД.
     """
     if user.adgram_user_id:
-        return _charge_adgram(user, paid, order_type, create_order, reason)
-    return _charge_local(user, paid, order_type, create_order, reason)
+        return _charge_adgram(user, paid, order_type, create_order, reason, lock_order)
+    return _charge_local(user, paid, order_type, create_order, reason, lock_order)
 
 
-def _charge_local(user, paid, order_type, create_order, reason):
+def _charge_local(user, paid, order_type, create_order, reason, lock_order):
     with transaction.atomic():
+        if lock_order:
+            lock_order()
         balance = _lock_balance(user)
         if balance.amount < paid:
             # Списком, как ошибки валидации DRF: эта ошибка рождается уже в save(), и DRF её сам не обернёт
@@ -104,7 +110,7 @@ def _charge_local(user, paid, order_type, create_order, reason):
     return order
 
 
-def _charge_adgram(user, paid, order_type, create_order, reason):
+def _charge_adgram(user, paid, order_type, create_order, reason, lock_order):
     if not adgram_client.is_configured():
         raise PaymentUnavailable('Оплата через AdGram временно недоступна, попробуйте позже')
 
@@ -134,6 +140,8 @@ def _charge_adgram(user, paid, order_type, create_order, reason):
     # c) Деньги списаны — одной транзакцией создаём заказ и закрываем операцию
     try:
         with transaction.atomic():
+            if lock_order:
+                lock_order()
             balance = _lock_balance(user)
             carry = balance.carry
             balance.carry = Decimal('0')

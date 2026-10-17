@@ -1,6 +1,7 @@
 import logging
 from datetime import timedelta
 
+import redis
 from django.db.models import ProtectedError
 from django.utils import timezone
 
@@ -44,3 +45,14 @@ def cleanup_ad_media():
     logger.info('Удалено неиспользуемых медиа объявлений: %s', deleted)
     return deleted
 
+
+
+@app.task(ignore_result=True)
+def flush_ad_stats():
+    """Каждые 5 с: показы, клики и траты из Redis выдачи → Postgres; кончился бюджет → STOPPED"""
+    from apps.ads.serving.flush import flush
+    try:
+        flush()
+    except redis.RedisError:
+        # Redis выдачи лежит — сбрасывать нечего, дельты дождутся (одна строка вместо трейсбека каждые 5 с)
+        logger.warning('Сброс показов пропущен: Redis выдачи недоступен')

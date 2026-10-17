@@ -10,6 +10,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.ads.models import Ad, AdRevision, AdStateError, AdStatus, Placement
+from apps.ads.serving.store import ServingUnavailable
 from apps.billing.services import format_money
 from apps.common.pagination import StandardResultsSetPagination
 from apps.common.permissions import IsModerator
@@ -22,7 +23,9 @@ DECISION_ERROR_RESPONSES = {
     403: ERROR_RESPONSE,  # своё объявление модерировать нельзя
     404: ERROR_RESPONSE,
     409: ERROR_RESPONSE,  # уже не в том статусе (решили раньше / правку заменили)
+    503: ERROR_RESPONSE,  # блокировка: Redis выдачи недоступен — без него нельзя записать показанное
 }
+SERVING_DOWN_RESPONSE = {'error': 'Сервис выдачи рекламы временно недоступен, попробуйте позже'}
 AD_DECISION_RESPONSE = {
     'type': 'object',
     'properties': {
@@ -117,6 +120,9 @@ class BaseAdDecisionView(APIView):
                     refund_amount = getattr(ad, self.action)(request.user, reason)
         except AdStateError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        except ServingUnavailable:
+            # Деньги не двигались: без Redis вернули бы и за уже показанное
+            return Response(SERVING_DOWN_RESPONSE, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
         messages = {
             'approve': 'Объявление одобрено',

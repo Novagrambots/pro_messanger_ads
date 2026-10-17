@@ -63,7 +63,9 @@ services:
     # concurrency ограничиваем явно: без него celery берёт пул на число ядер хоста,
     # а на многоконтейнерном сервере это выбивает лимит file descriptors (EMFILE).
     # Двух воркеров хватает для конвертации медиа и чистки. nofile — страховка сверху.
-    command: celery -A core worker -l info --concurrency=2
+    # Очереди: по умолчанию (деньги, уведомления, чистка) и media (перекодирование видео).
+    # Сброс показов (serving_flush) — в отдельном воркере celery_flush
+    command: celery -A core worker -l info --concurrency=2 -Q celery,media
     ulimits:
       nofile:
         soft: 4096
@@ -82,6 +84,30 @@ services:
       - db
       - redis
       - web # Чтобы миграции точно прошли до запуска воркера
+    restart: unless-stopped
+
+  # Сброс показов объявлений v2 из Redis в Postgres (beat каждые 5 с) — своя очередь и свой
+  # воркер, чтобы перекодирование видео и прочие задачи его не задерживали. Один процесс:
+  # сбросы и так идут по одному (замок в Redis). -l warning — без строки в лог каждые 5 с
+  celery_flush:
+    build: .
+    container_name: channel_flush
+    command: celery -A core worker -l warning -Q serving_flush --concurrency=1
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
+    env_file:
+      - .env
+    environment:
+      - DEBUG=False
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CACHE_REDIS_URL=redis://redis:6379/1
+    depends_on:
+      - db
+      - redis
+      - web # миграции применяет web
     restart: unless-stopped
 
   celery_beat:

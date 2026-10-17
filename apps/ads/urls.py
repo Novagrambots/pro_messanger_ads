@@ -1,5 +1,6 @@
 from django.urls import include, path
 
+from apps.ads.serving import views as serving
 from apps.ads.views import (AdBudgetHistoryView, AdBudgetTopUpView, AdDetailView, AdListCreateView,
                             AdMediaDetailView, AdMediaUploadView, AdPricingView)
 from apps.directories.views import SimilarBotsView, SimilarChannelsView, TelegramResolveView
@@ -8,6 +9,9 @@ from apps.directories.views import SimilarBotsView, SimilarChannelsView, Telegra
 urlpatterns = [
     path('', AdListCreateView.as_view(), name='ads-list'),
     path('pricing/', AdPricingView.as_view(), name='ads-pricing'),
+    # Горячий путь выдачи (простые Django-вьюхи, X-API-Key)
+    path('serve/', serving.serve, name='ads-serve'),
+    path('events/', serving.events, name='ads-events'),
     path('media/', AdMediaUploadView.as_view(), name='ads-media-upload'),
     path('media/<uuid:pk>/', AdMediaDetailView.as_view(), name='ads-media-detail'),
     path('directories/', include('apps.directories.urls')),

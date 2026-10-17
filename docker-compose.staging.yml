@@ -16,6 +16,8 @@ services:
     container_name: stg_web
   celery_worker:
     container_name: stg_worker
+  celery_flush:
+    container_name: stg_flush
   celery_beat:
     container_name: stg_beat
   nginx:

@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 from dotenv import load_dotenv
@@ -249,6 +250,11 @@ SPECTACULAR_SETTINGS = {
         'MoneyOperationStatusEnum': 'apps.billing.models.MoneyOperation.Status',
         'StatusEnum': 'apps.common.models.ModerationStatus',  # старое имя у старых заказов — не меняем
     },
+    # Горячий путь выдачи (/api/ads/serve/, /api/ads/events/) — простые Django-вьюхи, их пути добавляет хук
+    'POSTPROCESSING_HOOKS': [
+        'drf_spectacular.hooks.postprocess_schema_enums',
+        'apps.ads.serving.schema.add_serving_paths',
+    ],
     "SWAGGER_UI_SETTINGS": {
         "persistAuthorization": True,  # не сбрасывать авторизацию
     },
@@ -309,3 +315,25 @@ AD_SERVER_API_KEY = os.getenv('AD_SERVER_API_KEY')
 # Путь к сервисному JSON-ключу Firebase (push-уведомления в NovaGram Business).
 # Пусто или файла нет → push молча отключён, in-app уведомления работают.
 FIREBASE_CREDENTIALS_FILE = os.getenv('FIREBASE_CREDENTIALS_FILE', '')
+
+# ============================ Выдача объявлений v2 (apps/ads/serving) ============================
+# Отдельный Redis выдачи: бюджеты, счётчики, дельты показов (AOF + noeviction — см. docker-compose).
+# Тесты ходят в свою базу (ADS_REDIS_TEST_URL) — тесты выдачи очищают её перед каждым тестом
+TESTING = sys.argv[1:2] == ['test']
+if TESTING:
+    ADS_REDIS_URL = os.getenv('ADS_REDIS_TEST_URL', 'redis://localhost:6379/15')
+else:
+    ADS_REDIS_URL = os.getenv('ADS_REDIS_URL', 'redis://localhost:6379/2')
+# Секреты: viewer_key = HMAC(VIEWER_HASH_SECRET, user_id) и подпись random_id.
+# Пусто → выдача и события отвечают 503 (fail-closed)
+VIEWER_HASH_SECRET = os.getenv('VIEWER_HASH_SECRET', '')
+ADS_TOKEN_SECRET = os.getenv('ADS_TOKEN_SECRET', '')
+ADS_CACHE_TTL = int(os.getenv('ADS_CACHE_TTL', '300'))    # сколько клиент кэширует ответ, с
+ADS_EMPTY_TTL = int(os.getenv('ADS_EMPTY_TTL', '60'))     # то же, когда выдача недоступна (Redis лежит)
+ADS_TOKEN_TTL = int(os.getenv('ADS_TOKEN_TTL', '3600'))   # срок жизни random_id, с
+# Лимиты запросов в минуту: на зрителя (запрос рекламы и события отдельно) и на IP
+ADS_RATE_VIEWER_SERVE = int(os.getenv('ADS_RATE_VIEWER_SERVE', '60'))
+ADS_RATE_VIEWER_EVENTS = int(os.getenv('ADS_RATE_VIEWER_EVENTS', '60'))
+ADS_RATE_IP = int(os.getenv('ADS_RATE_IP', '1200'))
+# Фоновый поток, который держит снимок объявлений свежим (в тестах выключен — снимок грузят явно)
+ADS_SNAPSHOT_THREAD = not TESTING and os.getenv('ADS_SNAPSHOT_THREAD', 'True') == 'True'

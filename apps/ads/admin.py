@@ -1,7 +1,8 @@
 from django.contrib import admin, messages
 from django.db import transaction
 
-from apps.ads.models import Ad, AdDecision, AdMedia, AdPricing, AdRevision, AdStateError
+from apps.ads.models import Ad, AdDailyStat, AdDecision, AdMedia, AdPricing, AdRevision, AdStateError
+from apps.ads.serving.store import ServingUnavailable
 
 
 class ReadOnlyInline(admin.TabularInline):
@@ -29,6 +30,12 @@ class AdDecisionInline(ReadOnlyInline):
     readonly_fields = fields
 
 
+class AdDailyStatInline(ReadOnlyInline):
+    model = AdDailyStat
+    fields = ('date', 'views', 'free_views', 'clicks', 'spent')
+    readonly_fields = fields
+
+
 @admin.register(Ad)
 class AdAdmin(admin.ModelAdmin):
     """
@@ -43,7 +50,7 @@ class AdAdmin(admin.ModelAdmin):
     list_select_related = ('user',)
     list_per_page = 30
     actions = ['approve_ads', 'decline_ads', 'block_ads']
-    inlines = [AdRevisionInline, AdDecisionInline]
+    inlines = [AdRevisionInline, AdDecisionInline, AdDailyStatInline]
 
     def has_add_permission(self, request):
         return False
@@ -59,7 +66,7 @@ class AdAdmin(admin.ModelAdmin):
 
     def _apply(self, request, queryset, method_name, done_text, **kwargs):
         """Каждое объявление — в своей транзакции под локом; не тот статус — пропускаем"""
-        done = skipped = 0
+        done = skipped = failed = 0
         for pk in queryset.values_list('pk', flat=True):
             try:
                 with transaction.atomic():
@@ -68,8 +75,12 @@ class AdAdmin(admin.ModelAdmin):
                 done += 1
             except AdStateError:
                 skipped += 1
-        self.message_user(request, f'{done_text}: {done}. Пропущено (не тот статус): {skipped}',
-                          level=messages.WARNING if skipped else messages.SUCCESS)
+            except ServingUnavailable:
+                failed += 1  # Redis выдачи недоступен — деньги не двигались
+        text = f'{done_text}: {done}. Пропущено (не тот статус): {skipped}'
+        if failed:
+            text += f'. Не выполнено (Redis выдачи недоступен, повторите позже): {failed}'
+        self.message_user(request, text, level=messages.WARNING if skipped or failed else messages.SUCCESS)
 
     @admin.action(description='Одобрить', permissions=['view'])
     def approve_ads(self, request, queryset):
