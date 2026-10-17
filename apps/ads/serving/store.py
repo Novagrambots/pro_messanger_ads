@@ -21,6 +21,8 @@ FLUSH_LOCK = PREFIX + 'flushlock'  # один сброс одновременн�
 DAILY_TTL = int(timedelta(days=3).total_seconds())   # потрачено за сутки
 FREQ_TTL = int(timedelta(days=2).total_seconds())    # показы зрителю за сутки
 FROZEN_TTL = 600     # ключ бюджета снят на время возврата / пересчёта
+HISTORY_DAYS = 30    # история каналов зрителя (аудитории и темы интересов формата «Пользователи»)
+HISTORY_MAX = 500    # каналов в истории, не больше
 CLICK_WINDOW = 5     # повторный клик того же зрителя по тому же объявлению не считаем, с
 RATE_TTL = 70        # счётчик лимита запросов живёт минуту (+ запас)
 
@@ -42,6 +44,11 @@ def daily_key(ad_id, day):
 def freq_key(viewer, day):
     """Хеш «объявление → сколько раз показали зрителю за сутки»"""
     return f'{PREFIX}f:{viewer}:{day}'
+
+
+def history_key(viewer):
+    """ZSET каналов, где зритель запрашивал рекламу: id канала → время (только viewer_key)"""
+    return f'{PREFIX}h:{viewer}'
 
 
 def event_key(nonce, kind):
@@ -261,17 +268,37 @@ def over_rate_limit(checks):
     checks — [(kind, ident, limit)]; лимит 0 — без ограничения.
     Один поход в Redis на все счётчики минуты. True — хоть один лимит превышен.
     """
+    return rate_limit_and_history(checks)[0]
+
+
+def rate_limit_and_history(checks, viewer=None, add_channel=None, read_history=False):
+    """
+    Один поход в Redis: счётчики лимитов + история каналов зрителя. add_channel — добавить канал
+    (метка — время; старше 30 дней отрезаем, держим не больше 500), read_history — прочитать.
+    Возвращает (лимит превышен, frozenset id каналов истории)
+    """
     checks = [check for check in checks if check[2] > 0]
-    if not checks:
-        return False
-    minute = int(timezone.now().timestamp()) // 60
+    if not checks and not add_channel and not read_history:
+        return False, frozenset()
+    now = timezone.now().timestamp()
+    minute = int(now) // 60
     pipe = store().redis.pipeline(transaction=False)
     for kind, ident, _ in checks:
         key = rate_key(kind, ident, minute)
         pipe.incr(key)
         pipe.expire(key, RATE_TTL)
+    history = history_key(viewer) if viewer else None
+    if history and add_channel:
+        pipe.zadd(history, {add_channel: now})
+        pipe.zremrangebyscore(history, '-inf', now - HISTORY_DAYS * 86400)
+        pipe.zremrangebyrank(history, 0, -(HISTORY_MAX + 1))  # самые старые сверх лимита
+        pipe.expire(history, HISTORY_DAYS * 86400)
+    if history and read_history:
+        pipe.zrange(history, 0, -1)
     results = pipe.execute()
-    return any(results[i * 2] > limit for i, (_, _, limit) in enumerate(checks))
+    limited = any(results[i * 2] > limit for i, (_, _, limit) in enumerate(checks))
+    channels = frozenset(int(item) for item in results[-1]) if history and read_history else frozenset()
+    return limited, channels
 
 
 def bump_version():

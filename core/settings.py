@@ -238,7 +238,8 @@ ADGRAM_INTERNAL_KEY = os.getenv('ADGRAM_INTERNAL_KEY', '')
 SPECTACULAR_SETTINGS = {
     'TITLE': 'NovaGram Business API',
     'DESCRIPTION': 'Бэкенд рекламной платформы NovaGram: реклама в поиске каналов и чатах, '
-                   'модерация заказов, балансы, партнёрская программа и системные баннеры.',
+                   'модерация заказов, балансы, партнёрская программа и системные баннеры. '
+                   'IP Geolocation by DB-IP (https://db-ip.com).',
     'VERSION': '2.1.0',
     'SERVE_INCLUDE_SCHEMA': False,
     # У Device и заказов поле называется platform, но наборы значений разные
@@ -341,5 +342,11 @@ ADS_RATE_VIEWER_SERVE = int(os.getenv('ADS_RATE_VIEWER_SERVE', '60'))
 ADS_RATE_VIEWER_EVENTS = int(os.getenv('ADS_RATE_VIEWER_EVENTS', '60'))
 ADS_RATE_VIEWER_REPORTS = int(os.getenv('ADS_RATE_VIEWER_REPORTS', '10'))
 ADS_RATE_IP = int(os.getenv('ADS_RATE_IP', '1200'))
+# IP клиента: заголовок, которому доверяем (например CF-Connecting-IP за Cloudflare).
+# Пусто → первый адрес X-Forwarded-For, иначе REMOTE_ADDR
+CLIENT_IP_HEADER = os.getenv('CLIENT_IP_HEADER', '')
+# Гео-база DB-IP Lite City (mmdb, CC BY 4.0 — «IP Geolocation by DB-IP»). Обновляет beat раз в месяц.
+# Файла нет → страна только по phone_country, города нет
+GEOIP_PATH = os.getenv('GEOIP_PATH') or str(BASE_DIR / 'data' / 'dbip-city-lite.mmdb')
 # Фоновый поток, который держит снимок объявлений свежим (в тестах выключен — снимок грузят явно)
 ADS_SNAPSHOT_THREAD = not TESTING and os.getenv('ADS_SNAPSHOT_THREAD', 'True') == 'True'

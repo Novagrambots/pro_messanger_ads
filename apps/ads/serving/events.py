@@ -1,32 +1,24 @@
 """
 События показа и клика. Каждое событие обрабатывается отдельно, все Lua-вызовы — одной пачкой в Redis.
 
-view засчитывается, если клиент видел объявление ≥ 1 с и ≥ 50% площади. Lua атомарно: дубль
-токена → отказ; зрителю сегодня показали лимит → отказ; иначе списание цены (если есть остаток
-и дневной лимит позволяет) или бесплатный показ. Объявление уже не ACTIVE (нет в снимке) —
-показ бесплатный. click — бесплатно; повтор того же зрителя по тому же объявлению за 5 с не считается.
-Оплаченный показ в подтверждённом канале партнёрки — ещё и доля партнёру (в том же Lua, в миллионных сума).
+view клиент шлёт, когда весь текст объявления на экране (как у Telegram); duration_ms и
+visible_ratio можно присылать — сервер их не проверяет. Lua атомарно: дубль токена → отказ;
+зрителю сегодня показали лимит → отказ; иначе списание цены (если есть остаток и дневной лимит
+позволяет) или бесплатный показ. Объявление уже не ACTIVE (нет в снимке) — показ бесплатный.
+click — бесплатно; повтор того же зрителя по тому же объявлению за 5 с не считается.
+Оплаченное сообщение в подтверждённом канале партнёрки — ещё и доля партнёру (в том же Lua,
+в миллионных сума).
 """
-import math
-
 from django.utils import timezone
+
+from apps.ads.models import Placement
 
 from . import store as S
 from . import tokens
 
 MAX_EVENTS = 50
-VIEW_MIN_DURATION_MS = 1000
-VIEW_MIN_VISIBLE_RATIO = 0.5
-
-
-def _number(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
-def _view_seen_enough(event):
-    duration, ratio = event.get('duration_ms'), event.get('visible_ratio')
-    return (_number(duration) and duration >= VIEW_MIN_DURATION_MS
-            and _number(ratio) and VIEW_MIN_VISIBLE_RATIO <= ratio <= 1)
+# Где показ приносит заработок каналу-партнёру (в видео, ботах и поиске — нет)
+PARTNER_PLACEMENTS = (Placement.CHANNEL_MESSAGE, Placement.USERS_CHANNEL_MESSAGE)
 
 
 def _prepare(store, event, viewer, snapshot, day, now):
@@ -39,14 +31,12 @@ def _prepare(store, event, viewer, snapshot, day, now):
     ad_id, ttl = token.ad_id, token.expires_in(now)
 
     if event.get('type') == 'view':
-        if not _view_seen_enough(event):
-            return None
         entry = snapshot.ads.get(ad_id)
         partner = ['', 0]
         if entry is not None:
             limits = [entry.freq_limit, 1, entry.price, entry.daily_limit]
             meta = snapshot.channels.get(token.channel_id) if token.channel_id else None
-            if meta is not None and meta.partner_permille:
+            if meta is not None and meta.partner_permille and entry.placement in PARTNER_PLACEMENTS:
                 # Цена в тысячных × доля в тысячных = миллионные сума — точно, без округления
                 partner = [token.channel_id, entry.price * meta.partner_permille]
         else:

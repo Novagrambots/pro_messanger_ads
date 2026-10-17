@@ -1,9 +1,13 @@
 """
 Выбор объявления на запрос рекламы. Запрос ничего не списывает — деньги по событию view.
 
+Клиент просит рекламу для слота (места в приложении), сервер собирает кандидатов из всех
+форматов этого слота, как у Telegram: канал — сообщение в канале + Пользователи; бот — бот +
+Пользователи; видео — баннер в видео (Пользователи); поиск — поиск.
+
 Подходит: ACTIVE (есть в снимке), расписание разрешает текущий час, остаток бюджета в Redis
 ≥ цены показа, дневной лимит не исчерпан, зрителю сегодня показали меньше лимита.
-Аукцион: наибольший CPM, при равенстве — случайный.
+Аукцион — один на слот: наибольший CPM, при равенстве — случайный.
 """
 import random
 
@@ -11,8 +15,19 @@ from django.utils import timezone
 
 from apps.ads.models import Placement
 
+from . import audience
 from . import store as S
 from .snapshot import allowed_now
+
+
+class Slot:
+    """Места в приложении, где клиент просит рекламу"""
+    SEARCH = 'SEARCH'
+    BOT = 'BOT'
+    CHANNEL_MESSAGE = 'CHANNEL_MESSAGE'
+    VIDEO = 'VIDEO'
+    ALL = (SEARCH, BOT, CHANNEL_MESSAGE, VIDEO)
+    IN_CHANNEL = (CHANNEL_MESSAGE, VIDEO)  # контекст — канал (идёт в историю зрителя и в токен)
 
 
 def channel_candidates(snapshot, channel_id):
@@ -36,22 +51,46 @@ def channel_candidates(snapshot, channel_id):
             if channel_id not in entry.channel_rule.exclude_channels and entry.promoted_id != channel_id]
 
 
-def candidates_for(snapshot, placement, key):
-    """Объявления по контексту запроса: key — нормализованная фраза поиска, имя бота или id канала"""
-    if placement == Placement.SEARCH:
+def users_candidates(snapshot, placement, profile, shown_in=None):
+    """Формат «Пользователи»: объявления страны зрителя, которым он подходит (audience.matches)"""
+    if profile is None or profile.country is None:
+        return []
+    return [entry for entry in snapshot.users.get(placement, {}).get(profile.country, ())
+            if audience.matches(entry.users_rule, profile, shown_in)]
+
+
+def users_in_channel(snapshot, placement, channel_id, profile):
+    """«Пользователи» в канале (сообщение, видео): без рекламы канала в нём самом"""
+    shown_in = snapshot.channels.get(channel_id)
+    return [entry for entry in users_candidates(snapshot, placement, profile, shown_in)
+            if entry.promoted_id != channel_id]
+
+
+def candidates_for(snapshot, slot, key, profile=None):
+    """
+    Кандидаты слота: key — нормализованная фраза поиска, имя бота или id канала;
+    profile — audience.Viewer (для формата «Пользователи»)
+    """
+    if slot == Slot.SEARCH:
         return snapshot.search.get(key, ())
-    if placement == Placement.BOT:
-        # Выбравшие этого бота + «любые боты»; бот, который сам себя продвигает, в своём чате не показывается
-        return [entry for entry in (*snapshot.bots.get(key, ()), *snapshot.any_bot) if entry.promoted_username != key]
-    if placement == Placement.CHANNEL_MESSAGE:
-        return channel_candidates(snapshot, key)
+    if slot == Slot.BOT:
+        # Выбравшие этого бота + «любые боты» + Пользователи; бот, который сам себя продвигает,
+        # в своём чате не показывается
+        found = (*snapshot.bots.get(key, ()), *snapshot.any_bot,
+                 *users_candidates(snapshot, Placement.USERS_BOT_BANNER, profile))
+        return [entry for entry in found if entry.promoted_username != key]
+    if slot == Slot.CHANNEL_MESSAGE:
+        return [*channel_candidates(snapshot, key),
+                *users_in_channel(snapshot, Placement.USERS_CHANNEL_MESSAGE, key, profile)]
+    if slot == Slot.VIDEO:
+        return users_in_channel(snapshot, Placement.USERS_VIDEO_BANNER, key, profile)
     return ()
 
 
-def pick(snapshot, placement, key, viewer, now=None):
+def pick(snapshot, slot, key, viewer, now=None, profile=None):
     """Объявление для показа (AdEntry) или None. Один поход в Redis на всех кандидатов"""
     now = now or timezone.now()
-    candidates = [entry for entry in candidates_for(snapshot, placement, key) if allowed_now(entry.schedule, now)]
+    candidates = [entry for entry in candidates_for(snapshot, slot, key, profile) if allowed_now(entry.schedule, now)]
     if not candidates:
         return None
 

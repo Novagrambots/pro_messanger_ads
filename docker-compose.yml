@@ -51,6 +51,7 @@ services:
     volumes:
       - static_volume:/app/staticfiles
       - media_volume:/app/media
+      - geo_data:/app/data  # гео-база DB-IP (качает celery_worker раз в месяц)
       # Сервисный ключ Firebase для push (лежит рядом с проектом, в git не коммитится).
       # ВАЖНО: файл должен лежать на хосте ДО docker compose up — иначе docker создаст ПАПКУ firebase.json
       - ./firebase.json:/app/firebase.json:ro
@@ -88,6 +89,8 @@ services:
       nofile:
         soft: 16384
         hard: 16384
+    volumes:
+      - geo_data:/app/data:ro  # гео-база DB-IP: страна и город зрителя по IP
     env_file:
       - .env
     environment:
@@ -118,6 +121,7 @@ services:
         hard: 8192
     volumes:
       - media_volume:/app/media # ОБЯЗАТЕЛЬНО: воркер должен видеть файлы, чтобы удалить их
+      - geo_data:/app/data # гео-база DB-IP: воркер раз в месяц скачивает свежую
       - ./firebase.json:/app/firebase.json:ro # push шлёт именно воркер
     env_file:
       - .env
@@ -198,3 +202,4 @@ volumes:
   static_volume:
   media_volume:
   redis_ads_data:
+  geo_data:

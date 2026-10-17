@@ -56,3 +56,10 @@ def flush_ad_stats():
     except redis.RedisError:
         # Redis выдачи лежит — сбрасывать нечего, дельты дождутся (одна строка вместо трейсбека каждые 5 с)
         logger.warning('Сброс показов пропущен: Redis выдачи недоступен')
+
+
+@app.task(ignore_result=True)
+def update_geoip():
+    """Раз в месяц: свежая гео-база DB-IP Lite City (файл подменяется атомарно, процессы подхватят сами)"""
+    from apps.ads.serving.geo import update_database
+    update_database()

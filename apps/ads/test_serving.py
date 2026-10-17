@@ -2,15 +2,22 @@
 Тесты выдачи v2 (apps/ads/serving) на настоящем Redis: выбор, токены, события, сброс в Postgres,
 заморозка перед возвратом, ноль SQL на горячем пути, гонка параллельных показов в потоках,
 порядок блокировок «объявление → баланс», очереди Celery, жалобы зрителей и сервис serving,
-место показа BOT (плашка в чате с ботом), CHANNEL_MESSAGE (сообщение в канале) и заработок партнёра.
+место показа BOT (плашка в чате с ботом), CHANNEL_MESSAGE (сообщение в канале) и заработок партнёра,
+формат «Пользователи» (Users) в слотах канала, бота и видео, гео зрителя (тестовая база geo-test.mmdb).
 Redis — ADS_REDIS_TEST_URL (по умолчанию redis://localhost:6379/15), очищается перед каждым тестом.
 """
+import gzip
+import io
 import json
+import os
+import shutil
+import tempfile
 import threading
 import time
 import unittest
 from datetime import datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -24,12 +31,13 @@ from django.utils import timezone
 from apps.ads.models import Ad, AdDailyStat, AdReport, AdStatus, FlushBatch, Placement
 from apps.ads.serving import events, flush as flushing, selection, snapshot, store as S, tokens
 from apps.ads.serving import views as serving_views
-from apps.ads.models import AdMedia
+from apps.ads.models import AdMedia, AdPricing
+from apps.ads.serving import audience, geo
 from apps.ads.tests import (DARYO_ID, KUNUZ_ID, SPORTS, client_for, create_ad, make_local_user,  # noqa: F401
                             setUpModule, tearDownModule)
 from apps.billing import services as billing_services
 from apps.billing.models import Balance, MoneyOperation as Op
-from apps.directories.models import TelegramPeer
+from apps.directories.models import Location, TelegramPeer
 from apps.moderation.test_ads import make_moderator
 from apps.notifications.models import Notification
 from apps.partner.models import ChannelEarning, EarningTransaction
@@ -260,11 +268,10 @@ class SelectionTests(ServingBase):
             self.reload()
             self.assertIsNone(self.serve_ad(), status)
 
-    def test_other_placements_are_empty_for_now(self):
-        self.active_ad()
-        self.reload()
-        response = self.serve(placement=Placement.USERS_CHANNEL_MESSAGE)  # пользователи — этап 7г
-        self.assertEqual(response.json(), {'ads': [], 'ttl_seconds': settings.ADS_CACHE_TTL})
+    def test_placement_is_a_slot(self):
+        # В запросе — место в приложении (слот), а не формат: форматы «Пользователи» сервер подбирает сам
+        for placement in (Placement.USERS_CHANNEL_MESSAGE, Placement.USERS_VIDEO_BANNER, Placement.USERS_BOT_BANNER):
+            self.assertEqual(self.serve(placement=placement).status_code, 400, placement)
 
     def test_bad_requests(self):
         def post(body, key=API_KEY, raw=None):
@@ -296,9 +303,9 @@ class SelectionTests(ServingBase):
             self.assertEqual(self.serve(2).status_code, 200)  # у другого зрителя свой счётчик
         self.r.flushdb()
         with override_settings(ADS_RATE_IP=3):
-            ip = {'HTTP_CF_CONNECTING_IP': '203.0.113.7'}
+            ip = {'HTTP_X_FORWARDED_FOR': '203.0.113.7, 10.0.0.1'}
             self.assertEqual([self.serve(user_id, **ip).status_code for user_id in (1, 2, 3, 4)], [200, 200, 200, 429])
-            self.assertEqual(self.serve(5, HTTP_CF_CONNECTING_IP='203.0.113.8').status_code, 200)
+            self.assertEqual(self.serve(5, HTTP_X_FORWARDED_FOR='203.0.113.8').status_code, 200)
             self.assertEqual(self.send(6, self.click('x'), **ip).status_code, 429)  # IP-лимит общий с событиями
 
     def test_redis_down(self):
@@ -369,20 +376,14 @@ class EventTests(ServingBase):
         self.ad = self.active_ad(views_per_user_per_day=0)
         self.reload()
 
-    def test_view_thresholds(self):
-        cases = [
-            ({'duration_ms': 999, 'visible_ratio': 0.9}, 0),
-            ({'duration_ms': 5000, 'visible_ratio': 0.49}, 0),
-            ({'duration_ms': 5000, 'visible_ratio': 1.5}, 0),
-            ({'duration_ms': True, 'visible_ratio': 0.9}, 0),
-            ({'duration_ms': '2000', 'visible_ratio': 0.9}, 0),
-            ({'visible_ratio': 0.9}, 0),
-            ({'duration_ms': 1000, 'visible_ratio': 0.5}, 1),  # ровно на пороге — засчитываем
-        ]
-        for user_id, (seen, accepted) in enumerate(cases, start=1):
-            event = {'random_id': self.token(self.ad, user_id), 'type': 'view', **seen}
-            self.assertEqual(self.sent(user_id, event), (accepted, 1 - accepted), seen)
-        self.assertEqual(self.budget_left(self.ad), 10_000_000 - 1000)
+    def test_view_counts_without_thresholds(self):
+        # Как у Telegram: view клиент шлёт, когда весь текст на экране; длительность и доля не проверяются
+        cases = [{}, {'duration_ms': 1}, {'visible_ratio': 0.1}, {'duration_ms': '2000', 'visible_ratio': 'x'},
+                 {'duration_ms': 5000, 'visible_ratio': 1.0}]
+        for user_id, extra in enumerate(cases, start=1):
+            event = {'random_id': self.token(self.ad, user_id), 'type': 'view', **extra}
+            self.assertEqual(self.sent(user_id, event), (1, 0), extra)
+        self.assertEqual(self.budget_left(self.ad), 10_000_000 - 1000 * len(cases))
 
     def test_one_view_and_one_click_per_token(self):
         token = self.token(self.ad)
@@ -1426,3 +1427,390 @@ class ChannelMetaTests(ChannelServingBase):
             self.assertEqual(self.mod_patch(DARYO_ID, {'topics': [BOOKS]}).status_code, 200)
         snapshot.refresh_if_needed()
         self.assertIsNone(self.served_in(DARYO_ID))
+
+
+GEO_FIXTURE = str(Path(__file__).with_name('fixtures') / 'geo-test.mmdb')
+# Адреса из тестовой гео-базы (apps/ads/fixtures/make_geo_test_mmdb.py)
+IP_ANGREN = '203.0.113.5'      # UZ, город Angren, регион Tashkent Region
+IP_TASHKENT = '198.51.100.7'   # UZ, город Tashkent, регион Toshkent Shahri
+IP_UZ_SAMARKAND = '100.64.0.9'  # UZ, города нет в справочнике, регион Samarqand Region
+IP_ALMATY = '192.0.2.1'        # KZ
+POLITICS = audience.POLITICS_TOPIC
+
+
+def location(name):
+    return Location.objects.get(name_en=name).pk
+
+
+@override_settings(GEOIP_PATH=GEO_FIXTURE)
+class UsersBase(ChannelServingBase):
+    """Формат «Пользователи»: объявления, запросы слотов и профиль зрителя"""
+
+    def setUp(self):
+        super().setUp()
+        geo._database = geo._Database()  # база гео — своя у каждого теста (путь подменяется)
+
+    def users_ad(self, placement=Placement.USERS_CHANNEL_MESSAGE, cpm=1000, url='https://t.me/kunuz', **targeting):
+        response = create_ad(self.owner_client, placement, cpm=cpm, url=url,
+                             targeting={'countries': ['UZ'], **targeting})
+        self.assertEqual(response.status_code, 201, response.data)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(self.mod_client.post(f'/api/moderation/ads/{response.data["id"]}/approve/').status_code,
+                             200)
+        return Ad.objects.get(pk=response.data['id'])
+
+    def serve_slot(self, slot, context, user_id=1, ip=None, **fields):
+        body = {'placement': slot, 'user_id': user_id, 'context': context, **fields}
+        headers = {'HTTP_X_FORWARDED_FOR': ip} if ip else {}
+        return self.client.post('/api/ads/serve/', json.dumps(body), content_type='application/json',
+                                HTTP_X_API_KEY=API_KEY, **headers)
+
+    def served(self, slot, context, **kwargs):
+        response = self.serve_slot(slot, context, **kwargs)
+        self.assertEqual(response.status_code, 200, response.content)
+        ads = response.json()['ads']
+        return tokens.decode(ads[0]['random_id']).ad_id if ads else None
+
+    @staticmethod
+    def in_channel(channel_id=DARYO_ID):
+        return {'channel_id': channel_id}
+
+
+class UsersGeoTests(UsersBase):
+    """Страна (phone_country важнее IP), город и область по IP, нет гео-базы"""
+
+    def test_country_phone_beats_ip(self):
+        ad = self.users_ad(countries=['KZ'])
+        self.reload()
+        slot, where = 'CHANNEL_MESSAGE', self.in_channel()
+        self.assertEqual(self.served(slot, where, ip=IP_ANGREN, phone_country='KZ'), str(ad.pk))  # номер важнее IP
+        self.assertIsNone(self.served(slot, where, ip=IP_ALMATY, phone_country='uz'))
+        self.assertEqual(self.served(slot, where, ip=IP_ALMATY), str(ad.pk))       # без номера — по IP
+        self.assertIsNone(self.served(slot, where, ip=IP_ANGREN))
+        # Кода нет в справочнике — страна по IP
+        self.assertEqual(self.served(slot, where, ip=IP_ALMATY, phone_country='XX'), str(ad.pk))
+        self.assertIsNone(self.served(slot, where))  # ни номера, ни гео — страны нет
+        for bad in ('UZB', 'U1', '', 5):
+            self.assertEqual(self.serve_slot(slot, where, phone_country=bad).status_code, 400, bad)
+
+    def test_city_and_its_region(self):
+        angren = self.users_ad(locations=[location('Angren')])
+        self.reload()
+        where = self.in_channel()
+        self.assertEqual(self.served('CHANNEL_MESSAGE', where, ip=IP_ANGREN), str(angren.pk))
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', where, ip=IP_TASHKENT))
+
+        Ad.objects.filter(pk=angren.pk).update(targeting=dict(angren.targeting,
+                                                               locations=[location('Tashkent Region')]))
+        self.reload()
+        self.assertEqual(self.served('CHANNEL_MESSAGE', where, ip=IP_ANGREN), str(angren.pk))  # Ангрен — в области
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', where, ip=IP_TASHKENT))  # Ташкент — не Ташкентская область
+
+        Ad.objects.filter(pk=angren.pk).update(targeting=dict(angren.targeting,
+                                                               locations=[location('Samarqand Region')]))
+        self.reload()
+        # Города нет в справочнике, но регион из гео-базы совпал с областью
+        self.assertEqual(self.served('CHANNEL_MESSAGE', where, ip=IP_UZ_SAMARKAND), str(angren.pk))
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', where, ip=IP_ANGREN))
+
+    def test_country_with_and_without_locations(self):
+        ad = self.users_ad(countries=['UZ', 'KZ'], locations=[location('Angren')])
+        self.reload()
+        where = self.in_channel()
+        self.assertEqual(self.served('CHANNEL_MESSAGE', where, ip=IP_ALMATY), str(ad.pk))  # для KZ локаций нет
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', where, ip=IP_TASHKENT))
+        # Страна по номеру UZ, а IP из Казахстана — города UZ не знаем
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', where, ip=IP_ALMATY, phone_country='UZ'))
+
+    def test_without_geo_database(self):
+        plain = self.users_ad()
+        with_city = self.users_ad(locations=[location('Angren')], cpm=2000)
+        self.reload()
+        where = self.in_channel()
+        with override_settings(GEOIP_PATH='/nonexistent/dbip.mmdb'), self.assertLogs('apps.ads.serving.geo', 'WARNING'):
+            self.assertEqual(self.served('CHANNEL_MESSAGE', where, ip=IP_ANGREN, phone_country='UZ'), str(plain.pk))
+            self.assertIsNone(self.served('CHANNEL_MESSAGE', where, ip=IP_ANGREN))  # страны нет — Users не идут
+        self.assertIsNotNone(with_city)
+
+    def test_geo_file_appears_and_is_picked_up(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        path = os.path.join(folder, 'dbip.mmdb')
+        with override_settings(GEOIP_PATH=path), self.assertLogs('apps.ads.serving.geo', 'WARNING'):
+            self.assertIsNone(geo.lookup(IP_ANGREN))
+            shutil.copyfile(GEO_FIXTURE, path + '.tmp')
+            os.replace(path + '.tmp', path)
+            geo._database.checked_at = 0  # прошла минута — процесс перепроверяет файл
+            self.assertEqual(geo.lookup(IP_ANGREN).country, 'UZ')
+            self.assertIsNone(geo.lookup('not-an-ip'))
+            self.assertIsNone(geo.lookup('8.8.8.8'))
+
+    def test_update_database(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        path = os.path.join(folder, 'dbip.mmdb')
+        packed = gzip.compress(Path(GEO_FIXTURE).read_bytes())
+        requested = []
+
+        class Response:
+            def __init__(self, status, body=b''):
+                self.status_code, self.raw = status, io.BytesIO(body)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+        def get(url, **kwargs):
+            requested.append(url)
+            # Файла за этот месяц ещё нет — берётся прошлый
+            return Response(404) if '2026-11' in url else Response(200, packed)
+
+        with override_settings(GEOIP_PATH=path), patch('apps.ads.serving.geo.requests.get', side_effect=get):
+            month = geo.update_database(now=datetime(2026, 11, 2, tzinfo=ZoneInfo('UTC')))
+            self.assertEqual(month, '2026-10')
+            self.assertTrue(requested[0].endswith('dbip-city-lite-2026-11.mmdb.gz'))
+            self.assertEqual(geo.lookup(IP_ALMATY).country, 'KZ')
+            self.assertEqual(os.listdir(folder), ['dbip.mmdb'])  # временный файл убран
+
+        # Битый файл не подменяет рабочий
+        with override_settings(GEOIP_PATH=path), patch('apps.ads.serving.geo.requests.get',
+                                                       return_value=Response(200, gzip.compress(b'garbage'))):
+            with self.assertRaises(Exception):
+                geo.update_database(now=datetime(2026, 12, 2, tzinfo=ZoneInfo('UTC')))
+        self.assertEqual(Path(path).read_bytes(), Path(GEO_FIXTURE).read_bytes())
+        self.assertEqual(os.listdir(folder), ['dbip.mmdb'])
+
+    def test_client_ip(self):
+        from django.test import RequestFactory
+        factory = RequestFactory()
+        request = factory.get('/', HTTP_X_FORWARDED_FOR='1.2.3.4, 10.0.0.1', HTTP_CF_CONNECTING_IP='5.6.7.8')
+        self.assertEqual(geo.client_ip(request), '1.2.3.4')
+        with override_settings(CLIENT_IP_HEADER='CF-Connecting-IP'):
+            self.assertEqual(geo.client_ip(request), '5.6.7.8')
+        self.assertEqual(geo.client_ip(factory.get('/')), '127.0.0.1')  # REMOTE_ADDR
+
+
+class UsersAudienceTests(UsersBase):
+    """Язык, устройство, темы интересов и аудитории из истории каналов, исключения, политика"""
+
+    def test_language_and_device(self):
+        ad = self.users_ad(languages=['uz'], devices=['android', 'desktop'])
+        self.reload()
+        where = self.in_channel()
+        ok = {'ip': IP_TASHKENT}
+        self.assertEqual(self.served('CHANNEL_MESSAGE', where, lang='uz-UZ', platform='Android', **ok), str(ad.pk))
+        self.assertEqual(self.served('CHANNEL_MESSAGE', where, lang='UZ', platform='windows', **ok), str(ad.pk))
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', where, lang='ru', platform='android', **ok))
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', where, lang='uz', platform='iPhone', **ok))
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', where, lang='uz', **ok))  # устройство неизвестно
+        Ad.objects.filter(pk=ad.pk).update(targeting=dict(ad.targeting, languages=[], devices=[]))
+        self.reload()
+        self.assertEqual(self.served('CHANNEL_MESSAGE', where, **ok), str(ad.pk))  # пусто — любые
+
+    def test_topics_from_channel_history(self):
+        self.channel(DARYO_ID, language='uz', topics=[SPORTS])
+        self.channel(GAZETA_ID, language='uz', topics=[BOOKS])
+        ad = self.users_ad(Placement.USERS_BOT_BANNER, topics=[SPORTS], exclude_topics=[CRYPTO])
+        self.reload()
+        bot = {'bot_username': 'weatherbot'}
+        self.assertIsNone(self.served('BOT', bot, user_id=1, ip=IP_TASHKENT))  # истории нет — тем нет
+        self.served('CHANNEL_MESSAGE', self.in_channel(DARYO_ID), user_id=1, ip=IP_TASHKENT)  # побывал в канале
+        self.assertEqual(self.served('BOT', bot, user_id=1, ip=IP_TASHKENT), str(ad.pk))
+        self.assertIsNone(self.served('BOT', bot, user_id=2, ip=IP_TASHKENT))  # другой зритель — без истории
+        # Исключённая тема среди интересов — не показываем
+        ChannelEarning.objects.filter(channel_id=GAZETA_ID).update(topics=[BOOKS, CRYPTO])
+        self.reload()
+        self.served('CHANNEL_MESSAGE', self.in_channel(GAZETA_ID), user_id=1, ip=IP_TASHKENT)
+        self.assertIsNone(self.served('BOT', bot, user_id=1, ip=IP_TASHKENT))
+
+    def test_channel_audiences(self):
+        ad = self.users_ad(Placement.USERS_BOT_BANNER, channel_audiences=['daryo'],
+                           exclude_channel_audiences=['gazeta'])
+        self.reload()
+        bot = {'bot_username': 'weatherbot'}
+        self.assertIsNone(self.served('BOT', bot, user_id=1, ip=IP_TASHKENT))
+        self.served('VIDEO', {'channel_id': DARYO_ID, 'msg_id': 7}, user_id=1, ip=IP_TASHKENT)  # видео — тоже история
+        self.assertEqual(self.served('BOT', bot, user_id=1, ip=IP_TASHKENT), str(ad.pk))
+        self.served('CHANNEL_MESSAGE', self.in_channel(GAZETA_ID), user_id=1, ip=IP_TASHKENT)
+        self.assertIsNone(self.served('BOT', bot, user_id=1, ip=IP_TASHKENT))  # аудитория исключённого канала
+
+    def test_dimensions_combine_with_and(self):
+        self.channel(DARYO_ID, language='uz', topics=[SPORTS])
+        ad = self.users_ad(languages=['uz', 'ru'], topics=[SPORTS, BOOKS], devices=['ios'],
+                           locations=[location('Tashkent')])
+        self.reload()
+        where = self.in_channel(DARYO_ID)  # запрос в daryo сам кладёт его в историю (тема Sports)
+        full = {'ip': IP_TASHKENT, 'lang': 'ru', 'platform': 'ios'}
+        self.assertEqual(self.served('CHANNEL_MESSAGE', where, **full), str(ad.pk))  # внутри списков — ИЛИ
+        for broken in ({'ip': IP_ANGREN}, {'lang': 'en'}, {'platform': 'android'}):
+            self.assertIsNone(self.served('CHANNEL_MESSAGE', where, user_id=1, **{**full, **broken}), broken)
+
+    def test_history_30_days_and_500_channels(self):
+        viewer = tokens.viewer_key(1)
+        key = S.history_key(viewer)
+        now = time.time()
+        self.r.zadd(key, {'-1001000000777': now - 31 * 86400})  # старше 30 дней
+        self.r.zadd(key, {str(-1001000001000 - n): now - 1000 + n for n in range(500)})
+        self.serve_slot('CHANNEL_MESSAGE', self.in_channel(DARYO_ID), ip=IP_TASHKENT)
+        members = self.r.zrange(key, 0, -1)
+        self.assertEqual(len(members), 500)                # не больше 500
+        self.assertNotIn('-1001000000777', members)        # старше 30 дней — отрезано
+        self.assertNotIn(str(-1001000001000), members)     # самый старый из 500 вытеснен новым
+        self.assertEqual(members[-1], str(DARYO_ID))
+        self.assertTrue(0 < self.r.ttl(key) <= 30 * 86400)
+        self.assertEqual(self.r.keys(f'{S.PREFIX}h:*'), [key])  # ключ — только viewer_key, сырого id нет
+
+    def test_politics(self):
+        self.channel(DARYO_ID, language='uz', topics=[POLITICS, SPORTS])
+        self.channel(GAZETA_ID, language='uz', topics=[SPORTS])
+        self.channel(OTHER_ID, language='uz')  # темы неизвестны
+        only = self.users_ad(politics='only')
+        self.reload()
+        ip = {'ip': IP_TASHKENT}
+        self.assertEqual(self.served('CHANNEL_MESSAGE', self.in_channel(DARYO_ID), **ip), str(only.pk))
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', self.in_channel(GAZETA_ID), **ip))
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', self.in_channel(OTHER_ID), **ip))
+
+        Ad.objects.filter(pk=only.pk).update(targeting=dict(only.targeting, politics='exclude'))
+        self.reload()
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', self.in_channel(DARYO_ID), **ip))
+        self.assertEqual(self.served('CHANNEL_MESSAGE', self.in_channel(GAZETA_ID), user_id=2, **ip), str(only.pk))
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', self.in_channel(OTHER_ID), user_id=3, **ip))  # без тем — нет
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', self.in_channel(-1001000000099), user_id=3, **ip))
+
+        video = self.users_ad(Placement.USERS_VIDEO_BANNER, politics='only')
+        self.reload()
+        self.assertEqual(self.served('VIDEO', {'channel_id': DARYO_ID, 'msg_id': 1}, user_id=4, **ip), str(video.pk))
+        self.assertIsNone(self.served('VIDEO', {'channel_id': GAZETA_ID, 'msg_id': 1}, user_id=4, **ip))
+
+    def test_own_channel_and_own_bot(self):
+        in_channel = self.users_ad()  # продвигает kunuz
+        in_bot = self.users_ad(Placement.USERS_BOT_BANNER, url='https://t.me/weatherbot')
+        self.reload()
+        ip = {'ip': IP_TASHKENT}
+        self.assertIsNone(self.served('CHANNEL_MESSAGE', self.in_channel(KUNUZ_ID), **ip))
+        self.assertEqual(self.served('CHANNEL_MESSAGE', self.in_channel(DARYO_ID), **ip), str(in_channel.pk))
+        self.assertIsNone(self.served('BOT', {'bot_username': 'weatherbot'}, **ip))
+        self.assertEqual(self.served('BOT', {'bot_username': 'kinobot'}, **ip), str(in_bot.pk))
+
+    def test_normalization_helpers(self):
+        known = {'en', 'uz', 'pt-br', 'zh-hans'}
+        cases = {'en-US': 'en', 'UZ': 'uz', 'pt_BR': 'pt-br', 'zh-Hans': 'zh-hans', 'xx-YY': None, '': None, None: None}
+        for value, expected in cases.items():
+            self.assertEqual(audience.normalize_language(value, known), expected, value)
+        for value, expected in {'iPad': 'ios', 'ANDROID': 'android', 'macos': 'desktop', 'tv': None, 5: None}.items():
+            self.assertEqual(audience.normalize_device(value), expected, value)
+        world = snapshot.load_world()
+        index = world.locations
+        self.assertEqual(index.resolve('UZ', ("Kattaqo'rg'on",), ()), {location("Kattaqo'rg'on Shahri"),
+                                                                       location('Samarqand Region')})
+        self.assertEqual(index.resolve('UZ', ('Qarshi',), ()), {location('Qarshi'), location('Qashqadaryo')})
+        self.assertEqual(index.resolve('UZ', ('Sergeli',), ()), {location('Sergeli'), location('Tashkent')})
+        self.assertEqual(index.resolve('UZ', (), ('Toshkent viloyati',)), {location('Tashkent Region')})
+        self.assertEqual(index.resolve('KZ', ('Angren',), ()), frozenset())
+
+
+class UsersSlotTests(UsersBase):
+    """Общий аукцион слотов, VIDEO, заработок по USERS_CHANNEL_MESSAGE, ноль SQL"""
+
+    def test_channel_slot_shared_auction(self):
+        self.channel(DARYO_ID, language='uz')
+        channels = self.channel_ad(cpm=1000, languages=['uz'])
+        users = self.users_ad(cpm=2000)
+        self.reload()
+        where, ip = self.in_channel(DARYO_ID), {'ip': IP_TASHKENT}
+        self.assertEqual(self.served('CHANNEL_MESSAGE', where, user_id=1, **ip), str(users.pk))  # Users дороже
+        token = self.serve_slot('CHANNEL_MESSAGE', where, user_id=1, **ip).json()['ads'][0]['random_id']
+        self.assertEqual(tokens.decode(token).placement, Placement.USERS_CHANNEL_MESSAGE)  # в токене — формат
+        self.assertEqual(self.sent(1, self.view(token)), (1, 0))
+        self.assertEqual(self.served('CHANNEL_MESSAGE', where, user_id=1, **ip), str(channels.pk))  # следующий
+        Ad.objects.filter(pk=channels.pk).update(cpm=3000)
+        self.reload()
+        self.assertEqual(self.served('CHANNEL_MESSAGE', where, user_id=2, **ip), str(channels.pk))
+
+    def test_bot_slot_shared_auction(self):
+        bots = self.bot_ad(bots=['weatherbot'], cpm=3000)
+        users = self.users_ad(Placement.USERS_BOT_BANNER, cpm=2000)
+        self.reload()
+        bot, ip = {'bot_username': 'weatherbot'}, {'ip': IP_TASHKENT}
+        self.assertEqual(self.served('BOT', bot, user_id=1, **ip), str(bots.pk))
+        self.assertEqual(self.served('BOT', {'bot_username': 'kinobot'}, user_id=1, **ip), str(users.pk))
+        Ad.objects.filter(pk=users.pk).update(cpm=4000)
+        self.reload()
+        self.assertEqual(self.served('BOT', bot, user_id=1, **ip), str(users.pk))
+
+    def bot_ad(self, bots=(), cpm=1000):
+        response = create_ad(self.owner_client, Placement.BOT, cpm=cpm, targeting={'bots': list(bots)})
+        self.assertEqual(response.status_code, 201, response.data)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.mod_client.post(f'/api/moderation/ads/{response.data["id"]}/approve/')
+        return Ad.objects.get(pk=response.data['id'])
+
+    def test_video_slot(self):
+        self.channel(DARYO_ID, language='uz')
+        self.channel_ad(cpm=5000, languages=['uz'])  # сообщения в канале в видео не идут
+        video = self.users_ad(Placement.USERS_VIDEO_BANNER)
+        self.reload()
+        context, ip = {'channel_id': DARYO_ID, 'msg_id': 42}, {'ip': IP_TASHKENT}
+        data = self.serve_slot('VIDEO', context, **ip).json()
+        self.assertEqual((data['start_delay'], data['between_delay'], data['ttl_seconds']),
+                         (5, 120, settings.ADS_CACHE_TTL))
+        item = data['ads'][0]
+        self.assertEqual(tokens.decode(item['random_id']).ad_id, str(video.pk))
+        self.assertNotIn('media', item)
+        self.assertNotIn('button_type', item)
+        self.assertEqual((item['min_display_duration'], item['max_display_duration'], item['text']),
+                         (9, 30, video.text))
+
+        pricing = AdPricing.load()
+        pricing.video_start_delay, pricing.video_max_display = 3, 45
+        pricing.save()
+        self.reload()
+        data = self.serve_slot('VIDEO', context, user_id=2, **ip).json()
+        self.assertEqual((data['start_delay'], data['ads'][0]['max_display_duration']), (3, 45))
+        empty = self.serve_slot('VIDEO', {'channel_id': OTHER_ID, 'msg_id': 1}).json()  # страны нет — Users нет
+        self.assertEqual((empty['ads'], empty['start_delay']), ([], 3))
+        for bad in ({'channel_id': DARYO_ID}, {'channel_id': DARYO_ID, 'msg_id': 0},
+                    {'channel_id': DARYO_ID, 'msg_id': '5'}, {'msg_id': 5}):
+            self.assertEqual(self.serve_slot('VIDEO', bad).status_code, 400, bad)
+
+    def test_pricing_rejects_min_above_max(self):
+        from django.core.exceptions import ValidationError
+        pricing = AdPricing.load()
+        pricing.video_min_display, pricing.video_max_display = 40, 30
+        with self.assertRaises(ValidationError):
+            pricing.full_clean()
+
+    def test_partner_earns_on_users_channel_message_only(self):
+        self.channel(DARYO_ID, language='uz', confirmed=True)
+        message = self.users_ad(cpm=1000)
+        video = self.users_ad(Placement.USERS_VIDEO_BANNER, cpm=1000)
+        self.reload()
+        ip = {'ip': IP_TASHKENT}
+        token = self.serve_slot('CHANNEL_MESSAGE', self.in_channel(DARYO_ID), **ip).json()['ads'][0]['random_id']
+        self.assertEqual(self.sent(1, self.view(token)), (1, 0))
+        token = self.serve_slot('VIDEO', {'channel_id': DARYO_ID, 'msg_id': 1}, **ip).json()['ads'][0]['random_id']
+        self.assertEqual(tokens.decode(token).channel_id, DARYO_ID)
+        self.assertEqual(self.sent(1, self.view(token)), (1, 0))
+        self.flush()
+        daryo = ChannelEarning.objects.get(channel_id=DARYO_ID)
+        self.assertEqual((daryo.total_earned, daryo.total_impressions), (Decimal('0.5'), 1))  # только сообщение
+        self.assertEqual(EarningTransaction.objects.get(channel=daryo).ad_id, message.pk)
+        self.assertEqual(self.fresh(video).spent, Decimal('1'))  # видео оплачено, но без партнёрки
+
+    def test_zero_sql(self):
+        self.channel(DARYO_ID, language='uz', topics=[SPORTS])
+        self.users_ad(topics=[SPORTS], languages=['uz'])
+        self.users_ad(Placement.USERS_VIDEO_BANNER)
+        self.reload()
+        with self.assertNumQueries(0):
+            response = self.serve_slot('CHANNEL_MESSAGE', self.in_channel(DARYO_ID), ip=IP_ANGREN, lang='uz')
+            token = response.json()['ads'][0]['random_id']
+            self.assertEqual(self.sent(1, self.view(token), self.click(token)), (2, 0))
+            data = self.serve_slot('VIDEO', {'channel_id': DARYO_ID, 'msg_id': 3}, ip=IP_ANGREN).json()
+            self.assertEqual(len(data['ads']), 1)

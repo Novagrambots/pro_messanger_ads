@@ -42,6 +42,11 @@ app.conf.beat_schedule = {
         'schedule': 5.0,
         'options': {'expires': 5},
     },
+    # Выдача v2: свежая гео-база DB-IP Lite City (страна и город зрителя по IP) — 3-го числа каждого месяца
+    'update-geoip-monthly': {
+        'task': 'apps.ads.tasks.update_geoip',
+        'schedule': crontab(minute=0, hour=4, day_of_month='3'),
+    },
     # Объявления v2: удалить медиа старше суток, которые никуда не прикрепили
     'cleanup-ad-media-daily': {
         'task': 'apps.ads.tasks.cleanup_ad_media',

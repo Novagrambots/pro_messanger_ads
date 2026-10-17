@@ -16,20 +16,22 @@ from django.utils.crypto import constant_time_compare
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from apps.ads.models import Ad, AdReport, Placement
+from apps.ads.models import Ad, AdReport
 from apps.directories.telegram import normalize_username
 
 from . import events as ad_events
-from . import selection, snapshot
+from . import audience, geo, selection, snapshot
 from . import store as S
 from . import tokens
+from .selection import Slot
 
 logger = logging.getLogger(__name__)
 
 MAX_QUERY_LENGTH = 256
 CHANNEL_ID_RE = re.compile(r'-100\d{10,13}')  # id канала как в Bot API / TDLib
+COUNTRY_RE = re.compile(r'[A-Za-z]{2}')        # phone_country — ISO-2 из кода номера телефона
 MAX_REPORT_DETAILS = 500
-CLIENT_FIELDS = ('lang', 'platform', 'app_version')  # принимаем, для поиска пока не используются
+CLIENT_FIELDS = ('lang', 'platform', 'app_version', 'phone_country')
 _last_outage_log = 0.0
 
 
@@ -50,12 +52,6 @@ def _has_api_key(request):
     expected = settings.AD_SERVER_API_KEY
     provided = request.headers.get('X-API-Key')
     return bool(expected and provided and constant_time_compare(provided, expected))
-
-
-def _client_ip(request):
-    # Настоящий IP ставит Cloudflare; без него — то, что передал nginx
-    return (request.headers.get('CF-Connecting-IP') or request.headers.get('X-Real-IP')
-            or request.META.get('REMOTE_ADDR', ''))
 
 
 def _parse(request):
@@ -94,13 +90,42 @@ def _channel_id(value):
     return int(value) if CHANNEL_ID_RE.fullmatch(value) else None
 
 
-def _public_ad(entry, request, random_id):
-    """Объявление для клиента: публичная часть снимка + random_id, ссылки на файлы — абсолютные"""
+def _viewer_profile(snap, data, request, history):
+    """
+    Профиль для формата «Пользователи» — только в памяти: страна по phone_country (иначе по IP),
+    локации — город по IP и его область (если IP из той же страны), язык, устройство,
+    история каналов и темы интересов (темы каналов из истории)
+    """
+    world = snap.world
+    country = (data.get('phone_country') or '').upper()
+    country = country if country in world.countries else None
+    place = geo.lookup(geo.client_ip(request))
+    if country is None and place is not None and place.country in world.countries:
+        country = place.country
+    locations = frozenset()
+    if place is not None and country is not None and place.country == country:
+        locations = world.locations.resolve(country, place.cities, place.regions)
+    topics = frozenset().union(*(snap.channels[channel].topics for channel in history if channel in snap.channels))
+    return audience.Viewer(
+        country=country, locations=locations, language=audience.normalize_language(data.get('lang'), world.languages),
+        device=audience.normalize_device(data.get('platform')), channels=history, topics=topics,
+    )
+
+
+def _public_ad(entry, request, random_id, video=None):
+    """
+    Объявление для клиента: публичная часть снимка + random_id, ссылки на файлы — абсолютные.
+    В видео (как у Telegram) — только текст: без медиа и кнопки, зато со временем показа
+    """
     ad = {'random_id': random_id, **entry.payload}
     promoted = ad['promoted']
     if promoted['avatar_url']:
         ad['promoted'] = {**promoted, 'avatar_url': request.build_absolute_uri(promoted['avatar_url'])}
-    if ad['media']:
+    if video is not None:
+        del ad['media'], ad['button_type']
+        ad['min_display_duration'] = video['min_display_duration']
+        ad['max_display_duration'] = video['max_display_duration']
+    elif ad['media']:
         ad['media'] = {**ad['media'], 'url': request.build_absolute_uri(ad['media']['url'])}
     return ad
 
@@ -113,9 +138,9 @@ def serve(request):
     if error:
         return error
 
-    placement = data.get('placement')
-    if placement not in Placement.values:
-        return _error(f'placement — одно из: {", ".join(Placement.values)}', 400)
+    slot = data.get('placement')  # место в приложении: SEARCH, BOT, CHANNEL_MESSAGE, VIDEO
+    if slot not in Slot.ALL:
+        return _error(f'placement — одно из: {", ".join(Slot.ALL)}', 400)
     context = data.get('context') or {}
     if not isinstance(context, dict):
         return _error('context — объект', 400)
@@ -123,40 +148,54 @@ def serve(request):
         value = data.get(field)
         if value is not None and (not isinstance(value, str) or len(value) > 64):
             return _error(f'{field} — строка до 64 символов', 400)
+    if data.get('phone_country') is not None and not COUNTRY_RE.fullmatch(data['phone_country']):
+        return _error('phone_country — код страны ISO-2 (по коду номера телефона), например UZ', 400)
 
-    key = ''  # контекст места показа: фраза поиска, имя бота или id канала
-    if placement == Placement.SEARCH:
+    key = ''  # контекст слота: фраза поиска, имя бота или id канала
+    if slot == Slot.SEARCH:
         query = context.get('query')
         if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY_LENGTH:
             return _error(f'context.query — поисковый запрос до {MAX_QUERY_LENGTH} символов', 400)
         key = snapshot.normalize_query(query)
-    elif placement == Placement.BOT:
+    elif slot == Slot.BOT:
         key = _bot_username(context.get('bot_username'))
         if key is None:
             return _error('context.bot_username — имя бота в Telegram (оканчивается на «bot»)', 400)
-    elif placement == Placement.CHANNEL_MESSAGE:
+    else:
         key = _channel_id(context.get('channel_id'))
         if key is None:
             return _error('context.channel_id — id канала в формате -100… (как в Bot API)', 400)
+        msg_id = context.get('msg_id')
+        if slot == Slot.VIDEO and (isinstance(msg_id, bool) or not isinstance(msg_id, int) or msg_id <= 0):
+            return _error('context.msg_id — id сообщения с видео (целое > 0)', 400)
 
     try:
-        if S.over_rate_limit([('serve', viewer, settings.ADS_RATE_VIEWER_SERVE),
-                              ('ip', _client_ip(request), settings.ADS_RATE_IP)]):
+        # Лимиты 7а и история каналов зрителя — одним походом в Redis
+        limited, history = S.rate_limit_and_history(
+            [('serve', viewer, settings.ADS_RATE_VIEWER_SERVE), ('ip', geo.client_ip(request), settings.ADS_RATE_IP)],
+            viewer, add_channel=key if slot in Slot.IN_CHANNEL else None, read_history=slot != Slot.SEARCH)
+        if limited:
             return _error('Слишком много запросов', 429)
-        entry = selection.pick(snapshot.current(), placement, key, viewer)
+        snap = snapshot.current()
+        profile = _viewer_profile(snap, data, request, history) if slot != Slot.SEARCH else None
+        entry = selection.pick(snap, slot, key, viewer, profile=profile)
     except (redis.RedisError, DatabaseError):
         # Без Redis выдачи нет: пустой ответ с коротким кэшем на клиенте
         _log_outage('Выдача объявлений недоступна')
         return JsonResponse({'ads': [], 'ttl_seconds': settings.ADS_EMPTY_TTL})
 
+    video = snap.world.video if slot == Slot.VIDEO else None
     ads = []
     if entry is not None:
-        # В сообщении в канале id канала — в токене: по нему начислится заработок партнёру
-        channel_id = key if placement == Placement.CHANNEL_MESSAGE else None
-        random_id = tokens.issue(entry.id, viewer, placement, tokens.context_hash(placement, key),
+        # Канал (сообщение, видео) — в токене: по нему начислится заработок партнёру
+        channel_id = key if slot in Slot.IN_CHANNEL else None
+        random_id = tokens.issue(entry.id, viewer, entry.placement, tokens.context_hash(slot, key),
                                  channel_id=channel_id)
-        ads.append(_public_ad(entry, request, random_id))
-    return JsonResponse({'ads': ads, 'ttl_seconds': settings.ADS_CACHE_TTL})
+        ads.append(_public_ad(entry, request, random_id, video))
+    response = {'ads': ads, 'ttl_seconds': settings.ADS_CACHE_TTL}
+    if video is not None:
+        response.update(start_delay=video['start_delay'], between_delay=video['between_delay'])
+    return JsonResponse(response)
 
 
 @csrf_exempt
@@ -173,7 +212,7 @@ def events(request):
 
     try:
         if S.over_rate_limit([('events', viewer, settings.ADS_RATE_VIEWER_EVENTS),
-                              ('ip', _client_ip(request), settings.ADS_RATE_IP)]):
+                              ('ip', geo.client_ip(request), settings.ADS_RATE_IP)]):
             return _error('Слишком много запросов', 429)
         accepted, rejected = ad_events.process(snapshot.current(), viewer, items)
     except (redis.RedisError, DatabaseError):
@@ -203,7 +242,7 @@ def report(request):
 
     try:
         if S.over_rate_limit([('report', viewer, settings.ADS_RATE_VIEWER_REPORTS),
-                              ('ip', _client_ip(request), settings.ADS_RATE_IP)]):
+                              ('ip', geo.client_ip(request), settings.ADS_RATE_IP)]):
             return _error('Слишком много запросов', 429)
     except redis.RedisError:
         # Без Redis лимит не проверить — жалобу всё равно принимаем (их мало, одна от зрителя на объявление)

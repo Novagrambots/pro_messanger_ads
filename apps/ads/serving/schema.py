@@ -2,7 +2,7 @@
 Описание горячего пути выдачи (serve, events, report) в Swagger. Вьюхи — простые Django (не DRF),
 drf-spectacular их не видит, поэтому пути добавляет этот хук (SPECTACULAR_SETTINGS['POSTPROCESSING_HOOKS']).
 """
-from apps.ads.models import AdReport, Placement
+from apps.ads.models import AdReport
 
 USER_ID = {'type': 'integer', 'format': 'int64', 'description': 'Числовой id пользователя Telegram. '
            'На сервере не хранится — только HMAC от него'}
@@ -12,22 +12,28 @@ SERVE_REQUEST = {
     'type': 'object',
     'required': ['placement', 'user_id'],
     'properties': {
-        'placement': {'type': 'string', 'enum': list(Placement.values),
-                      'description': 'Место показа. Работают SEARCH, BOT и CHANNEL_MESSAGE, '
-                                     'остальные пока отдают пустой список'},
+        'placement': {'type': 'string', 'enum': ['SEARCH', 'BOT', 'CHANNEL_MESSAGE', 'VIDEO'],
+                      'description': 'Место в приложении (слот). Сервер сам подбирает объявления всех форматов '
+                                     'этого места: канал — сообщение в канале + Пользователи; бот — бот + '
+                                     'Пользователи; видео — баннер в видео; поиск — поиск'},
         'user_id': USER_ID,
         'context': {'type': 'object',
                     'description': 'SEARCH: {"query": "строка поиска"}; '
                                    'BOT: {"bot_username": "имя бота, в чате которого плашка"}; '
-                                   'CHANNEL_MESSAGE: {"channel_id": -1001234567890}',
+                                   'CHANNEL_MESSAGE: {"channel_id": -1001234567890}; '
+                                   'VIDEO: {"channel_id": -1001234567890, "msg_id": 123}',
                     'properties': {
                         'query': {'type': 'string', 'maxLength': 256},
                         'bot_username': {'type': 'string', 'description': 'Без @ или с @, регистр не важен'},
                         'channel_id': {'type': 'integer', 'format': 'int64',
                                        'description': 'id канала, где показываем, в формате Bot API (-100…)'},
+                        'msg_id': {'type': 'integer', 'description': 'VIDEO: id сообщения с видео'},
                     }},
-        'lang': {'type': 'string', 'maxLength': 64},
-        'platform': {'type': 'string', 'maxLength': 64},
+        'phone_country': {'type': 'string', 'minLength': 2, 'maxLength': 2,
+                          'description': 'ISO-2 страны по коду номера телефона (сам номер не нужен), например UZ. '
+                                         'Нет — страна по IP'},
+        'lang': {'type': 'string', 'maxLength': 64, 'description': 'Язык приложения: uz, ru, en-US…'},
+        'platform': {'type': 'string', 'maxLength': 64, 'description': 'ios, android или desktop'},
         'app_version': {'type': 'string', 'maxLength': 64},
     },
 }
@@ -64,7 +70,10 @@ AD = {
         },
         'other_info': {'type': 'string'},
         'label': {'type': 'string', 'enum': ['Ad']},
+        'min_display_duration': {'type': 'integer', 'description': 'Только VIDEO: закрыть можно через, с'},
+        'max_display_duration': {'type': 'integer', 'description': 'Только VIDEO: баннер скрывается через, с'},
     },
+    'description': 'В VIDEO — только текст: без media и button_type',
 }
 
 SERVE_RESPONSE = {
@@ -72,6 +81,8 @@ SERVE_RESPONSE = {
     'properties': {
         'ads': {'type': 'array', 'items': AD, 'description': 'Сейчас — не больше одного объявления'},
         'ttl_seconds': {'type': 'integer', 'description': 'Сколько клиент кэширует ответ'},
+        'start_delay': {'type': 'integer', 'description': 'Только VIDEO: первый баннер через, с воспроизведения'},
+        'between_delay': {'type': 'integer', 'description': 'Только VIDEO: следующий баннер через, с'},
     },
 }
 
@@ -88,8 +99,8 @@ EVENTS_REQUEST = {
                 'properties': {
                     'random_id': {'type': 'string'},
                     'type': {'type': 'string', 'enum': ['view', 'click']},
-                    'duration_ms': {'type': 'integer', 'description': 'view: сколько видел, мс (считаем от 1000)'},
-                    'visible_ratio': {'type': 'number', 'description': 'view: видимая доля 0–1 (считаем от 0.5)'},
+                    'duration_ms': {'type': 'integer', 'description': 'Необязательно, сервер не проверяет'},
+                    'visible_ratio': {'type': 'number', 'description': 'Необязательно, сервер не проверяет'},
                 },
             },
         },
@@ -139,7 +150,8 @@ PATHS = {
         SERVE_REQUEST, SERVE_RESPONSE, {'503': 'Выдача не настроена'}),
     '/api/ads/events/': _operation(
         'ads_events', 'События показа и клика',
-        'До 50 событий в пачке, каждое обрабатывается отдельно. Один view и один click на random_id; '
+        'До 50 событий в пачке, каждое обрабатывается отдельно. view — когда весь текст объявления на '
+        'экране (как у Telegram). Один view и один click на random_id; '
         'токен другого пользователя или просроченный — отклоняется. 503 — пришлите пачку позже.',
         EVENTS_REQUEST, EVENTS_RESPONSE, {'503': 'Приём событий временно недоступен'}),
     '/api/ads/report/': _operation(

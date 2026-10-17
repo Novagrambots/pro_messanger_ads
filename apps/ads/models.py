@@ -3,6 +3,7 @@ import uuid
 from decimal import Decimal
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.db.models import F, Q
 from django.utils import timezone
@@ -92,6 +93,12 @@ class AdPricing(models.Model):
 
     min_budget = models.PositiveIntegerField('Минимальный бюджет, сум', default=10000)
     terms_version = models.CharField('Текущая версия правил', max_length=32, default='1.0')
+
+    # Баннер в видео: тайминги отдаёт сервер, как у Telegram (по умолчанию — рыночные цифры)
+    video_start_delay = models.PositiveSmallIntegerField('Видео: первый баннер через, с', default=5)
+    video_between_delay = models.PositiveSmallIntegerField('Видео: следующий баннер через, с', default=120)
+    video_min_display = models.PositiveSmallIntegerField('Видео: закрыть можно через, с', default=9)
+    video_max_display = models.PositiveSmallIntegerField('Видео: баннер скрывается через, с', default=30)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -100,6 +107,10 @@ class AdPricing(models.Model):
 
     def __str__(self):
         return 'Цены и правила'
+
+    def clean(self):
+        if self.video_min_display > self.video_max_display:
+            raise ValidationError({'video_min_display': 'Закрыть можно не позже, чем баннер скроется сам'})
 
     @classmethod
     def load(cls):

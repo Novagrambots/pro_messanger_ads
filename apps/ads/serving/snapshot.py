@@ -1,6 +1,7 @@
 """
 Снимок ACTIVE-объявлений в памяти процесса: запрос рекламы и события не ходят в Postgres.
-Для сообщений в каналах — ещё язык, темы и доля партнёра каждого канала из партнёрки.
+Для сообщений в каналах — ещё язык, темы и доля партнёра каждого канала из партнёрки;
+для формата «Пользователи» — справочники стран, языков и локаций и тайминги баннера в видео.
 
 Фоновый поток раз в секунду сверяет версию в Redis (её повышает любое сохранение Ad) и
 перечитывает снимок при смене версии и в любом случае раз в 30 с. Самый первый запрос
@@ -20,11 +21,12 @@ from django.conf import settings
 from django.db import close_old_connections, transaction
 from django.db.models import Q
 
-from apps.ads.models import Ad, AdMedia, AdStatus, Placement
-from apps.directories.models import TelegramPeer
+from apps.ads.models import USERS_PLACEMENTS, Ad, AdMedia, AdPricing, AdStatus, Placement
+from apps.directories.models import Country, Language, Location, TelegramPeer
 from apps.partner.models import ChannelEarning
 
 from . import store as S
+from .audience import LocationIndex, users_rule
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +72,16 @@ class AdEntry:
     promoted_username: str  # что продвигаем (нижний регистр) — свой бот в своём чате не показывается
     promoted_id: int        # id продвигаемого канала — реклама канала не показывается в нём самом
     channel_rule: ChannelRule = None  # только у сообщения в канале
+    users_rule: object = None         # audience.UsersRule — только у формата «Пользователи»
+
+
+@dataclass(frozen=True)
+class World:
+    """Справочники для профиля зрителя и настройки показа"""
+    countries: frozenset = frozenset()
+    languages: frozenset = frozenset()
+    locations: LocationIndex = LocationIndex([])
+    video: dict = None  # тайминги баннера в видео (start_delay, between_delay, min/max_display_duration)
 
 
 def schedule_rule(schedule):
@@ -146,7 +158,7 @@ def share_permille(rate):
     return max(0, min(whole, 1000))
 
 
-def make_entry(ad):
+def make_entry(ad, world=None):
     promoted = _promoted(ad)
     payload = {
         'placement': ad.placement,
@@ -169,6 +181,8 @@ def make_entry(ad):
         promoted_username=promoted['username'].lower(),
         promoted_id=promoted['telegram_id'] if promoted['type'] == TelegramPeer.PeerType.CHANNEL else None,
         channel_rule=channel_rule(ad.targeting or {}) if ad.placement == Placement.CHANNEL_MESSAGE else None,
+        users_rule=(users_rule(ad.targeting or {}, (world or World()).locations.country)
+                    if ad.placement in USERS_PLACEMENTS else None),
     )
 
 
@@ -177,14 +191,15 @@ def _by_price(entries):
 
 
 class Snapshot:
-    def __init__(self, ads, version, channels=None):
+    def __init__(self, ads, version, channels=None, world=None):
         self.version = version
         self.loaded_at = time.monotonic()
         self.ads = {}
         self.channels = channels or {}  # channel_id → ChannelMeta
-        search, bots, any_bot, channel_ads, lang_ads = {}, {}, [], {}, {}
+        self.world = world or World()
+        search, bots, any_bot, channel_ads, lang_ads, users = {}, {}, [], {}, {}, {}
         for ad in ads:
-            entry = make_entry(ad)
+            entry = make_entry(ad, self.world)
             self.ads[entry.id] = entry
             targeting = ad.targeting or {}
             if ad.placement == Placement.SEARCH:
@@ -204,12 +219,18 @@ class Snapshot:
                 else:  # режим «языки + темы»
                     for language in rule.languages:
                         lang_ads.setdefault(language, []).append(entry)
+            elif ad.placement in USERS_PLACEMENTS:
+                for country in entry.users_rule.countries:  # страна обязательна — индекс по ней
+                    users.setdefault(ad.placement, {}).setdefault(country, []).append(entry)
         # Фраза / имя бота / канал / язык → объявления по убыванию ставки
         self.search = {phrase: _by_price(entries) for phrase, entries in search.items()}
         self.bots = {name: _by_price(entries) for name, entries in bots.items()}
         self.any_bot = _by_price(any_bot)
         self.channel_ads = {channel_id: _by_price(entries) for channel_id, entries in channel_ads.items()}
         self.lang_ads = {language: _by_price(entries) for language, entries in lang_ads.items()}
+        # Формат «Пользователи» → страна → объявления
+        self.users = {placement: {country: _by_price(entries) for country, entries in by_country.items()}
+                      for placement, by_country in users.items()}
 
 
 def load_channels():
@@ -226,6 +247,23 @@ def load_channels():
     return channels
 
 
+def load_world():
+    """Активные страны и языки, все локации (для города зрителя), тайминги видео из «Цен и правил»"""
+    pricing = AdPricing.load()
+    locations = [
+        (location.pk, location.country_id, [location.name_en, location.name_ru, location.name_uz],
+         [location.region_en, location.region_ru, location.region_uz])
+        for location in Location.objects.all()
+    ]
+    return World(
+        countries=frozenset(Country.objects.filter(is_active=True).values_list('code', flat=True)),
+        languages=frozenset(Language.objects.filter(is_active=True).values_list('code', flat=True)),
+        locations=LocationIndex(locations),
+        video={'start_delay': pricing.video_start_delay, 'between_delay': pricing.video_between_delay,
+               'min_display_duration': pricing.video_min_display, 'max_display_duration': pricing.video_max_display},
+    )
+
+
 def load():
     """Читает ACTIVE-объявления из Postgres и создаёт недостающие ключи бюджета в Redis"""
     s = S.store()
@@ -237,7 +275,7 @@ def load():
         pairs += [str(ad.pk), S.to_thousandths(ad.remaining_budget())]
     for start in range(0, len(pairs), _SETNX_CHUNK):
         s.setnx_budgets(args=[S.PREFIX, *pairs[start:start + _SETNX_CHUNK]])
-    return Snapshot(ads, version, load_channels())
+    return Snapshot(ads, version, load_channels(), load_world())
 
 
 _current = None
