@@ -15,17 +15,20 @@ from . import store as S
 from .snapshot import allowed_now
 
 
-def candidates_for(snapshot, placement, phrase):
-    """Объявления по контексту запроса (по убыванию ставки). Пока есть только поиск"""
+def candidates_for(snapshot, placement, key):
+    """Объявления по контексту запроса: key — нормализованная фраза поиска или имя бота"""
     if placement == Placement.SEARCH:
-        return snapshot.search.get(phrase, ())
+        return snapshot.search.get(key, ())
+    if placement == Placement.BOT:
+        # Выбравшие этого бота + «любые боты»; бот, который сам себя продвигает, в своём чате не показывается
+        return [entry for entry in (*snapshot.bots.get(key, ()), *snapshot.any_bot) if entry.promoted_username != key]
     return ()
 
 
-def pick(snapshot, placement, phrase, viewer, now=None):
+def pick(snapshot, placement, key, viewer, now=None):
     """Объявление для показа (AdEntry) или None. Один поход в Redis на всех кандидатов"""
     now = now or timezone.now()
-    candidates = [entry for entry in candidates_for(snapshot, placement, phrase) if allowed_now(entry.schedule, now)]
+    candidates = [entry for entry in candidates_for(snapshot, placement, key) if allowed_now(entry.schedule, now)]
     if not candidates:
         return None
 

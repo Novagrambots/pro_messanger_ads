@@ -16,6 +16,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from apps.ads.models import Ad, AdReport, Placement
+from apps.directories.telegram import normalize_username
 
 from . import events as ad_events
 from . import selection, snapshot
@@ -74,6 +75,15 @@ def _parse(request):
     return data, tokens.viewer_key(user_id), None
 
 
+def _bot_username(value):
+    """Имя бота из контекста: @, t.me-ссылка и регистр не важны. Не имя бота → None"""
+    try:
+        name = normalize_username(value)
+    except ValueError:
+        return None
+    return name if name.endswith('bot') else None
+
+
 def _public_ad(entry, request, random_id):
     """Объявление для клиента: публичная часть снимка + random_id, ссылки на файлы — абсолютные"""
     ad = {'random_id': random_id, **entry.payload}
@@ -104,18 +114,22 @@ def serve(request):
         if value is not None and (not isinstance(value, str) or len(value) > 64):
             return _error(f'{field} — строка до 64 символов', 400)
 
-    phrase = ''
+    key = ''  # контекст места показа: фраза поиска или имя бота
     if placement == Placement.SEARCH:
         query = context.get('query')
         if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY_LENGTH:
             return _error(f'context.query — поисковый запрос до {MAX_QUERY_LENGTH} символов', 400)
-        phrase = snapshot.normalize_query(query)
+        key = snapshot.normalize_query(query)
+    elif placement == Placement.BOT:
+        key = _bot_username(context.get('bot_username'))
+        if key is None:
+            return _error('context.bot_username — имя бота в Telegram (оканчивается на «bot»)', 400)
 
     try:
         if S.over_rate_limit([('serve', viewer, settings.ADS_RATE_VIEWER_SERVE),
                               ('ip', _client_ip(request), settings.ADS_RATE_IP)]):
             return _error('Слишком много запросов', 429)
-        entry = selection.pick(snapshot.current(), placement, phrase, viewer)
+        entry = selection.pick(snapshot.current(), placement, key, viewer)
     except (redis.RedisError, DatabaseError):
         # Без Redis выдачи нет: пустой ответ с коротким кэшем на клиенте
         _log_outage('Выдача объявлений недоступна')
@@ -123,7 +137,7 @@ def serve(request):
 
     ads = []
     if entry is not None:
-        random_id = tokens.issue(entry.id, viewer, placement, tokens.context_hash(placement, phrase))
+        random_id = tokens.issue(entry.id, viewer, placement, tokens.context_hash(placement, key))
         ads.append(_public_ad(entry, request, random_id))
     return JsonResponse({'ads': ads, 'ttl_seconds': settings.ADS_CACHE_TTL})
 

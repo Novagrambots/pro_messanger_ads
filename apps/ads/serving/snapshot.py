@@ -45,6 +45,7 @@ class AdEntry:
     daily_limit: int  # дневной лимит в тысячных сума, -1 — без лимита
     schedule: tuple   # (часовой пояс, 7 масок часов) или None — круглосуточно
     payload: dict     # публичная часть ответа (без random_id); ссылки на файлы — относительные
+    promoted_username: str  # что продвигаем (нижний регистр) — свой бот в своём чате не показывается
 
 
 def schedule_rule(schedule):
@@ -117,7 +118,12 @@ def make_entry(ad):
         daily_limit=ad.daily_limit * 1000 if ad.daily_limit else -1,
         schedule=schedule_rule(ad.schedule),
         payload=payload,
+        promoted_username=promoted['username'].lower(),
     )
+
+
+def _by_price(entries):
+    return tuple(sorted(entries, key=lambda e: -e.price))
 
 
 class Snapshot:
@@ -125,15 +131,24 @@ class Snapshot:
         self.version = version
         self.loaded_at = time.monotonic()
         self.ads = {}
-        search = {}
+        search, bots, any_bot = {}, {}, []
         for ad in ads:
             entry = make_entry(ad)
             self.ads[entry.id] = entry
+            targeting = ad.targeting or {}
             if ad.placement == Placement.SEARCH:
-                for phrase in {normalize_query(q) for q in (ad.targeting or {}).get('queries', [])}:
+                for phrase in {normalize_query(q) for q in targeting.get('queries', [])}:
                     search.setdefault(phrase, []).append(entry)
-        # Фраза → объявления по убыванию ставки
-        self.search = {phrase: tuple(sorted(entries, key=lambda e: -e.price)) for phrase, entries in search.items()}
+            elif ad.placement == Placement.BOT:
+                names = {name.lower() for name in targeting.get('bots') or []}
+                for name in names:
+                    bots.setdefault(name, []).append(entry)
+                if not names:
+                    any_bot.append(entry)  # боты не выбраны — показываем в любых
+        # Фраза / имя бота → объявления по убыванию ставки
+        self.search = {phrase: _by_price(entries) for phrase, entries in search.items()}
+        self.bots = {name: _by_price(entries) for name, entries in bots.items()}
+        self.any_bot = _by_price(any_bot)
 
 
 def load():

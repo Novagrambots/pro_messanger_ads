@@ -1,7 +1,8 @@
 """
 Тесты выдачи v2 (apps/ads/serving) на настоящем Redis: выбор, токены, события, сброс в Postgres,
 заморозка перед возвратом, ноль SQL на горячем пути, гонка параллельных показов в потоках,
-порядок блокировок «объявление → баланс», очереди Celery, жалобы зрителей и сервис serving.
+порядок блокировок «объявление → баланс», очереди Celery, жалобы зрителей и сервис serving,
+место показа BOT (плашка в чате с ботом).
 Redis — ADS_REDIS_TEST_URL (по умолчанию redis://localhost:6379/15), очищается перед каждым тестом.
 """
 import json
@@ -259,7 +260,7 @@ class SelectionTests(ServingBase):
     def test_other_placements_are_empty_for_now(self):
         self.active_ad()
         self.reload()
-        response = self.serve(placement=Placement.BOT)
+        response = self.serve(placement=Placement.CHANNEL_MESSAGE)  # каналы — этап 7б
         self.assertEqual(response.json(), {'ads': [], 'ttl_seconds': settings.ADS_CACHE_TTL})
 
     def test_bad_requests(self):
@@ -980,3 +981,120 @@ class CeleryQueueTests(SimpleTestCase):
         self.assertEqual(queue('apps.ads.tasks.process_ad_media'), 'media')
         self.assertEqual(queue('apps.billing.tasks.process_money_operations'), 'celery')
         self.assertEqual(queue('apps.ads.tasks.apply_ad_dates'), 'celery')
+
+
+class BotPlacementTests(ServingBase):
+    """Место показа BOT: выбранные боты и «любые боты», аукцион между ними, свой бот не в своём чате"""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        for username in ('newsbot', 'kinobot'):  # боты в кэше TelegramPeer — тесты не ходят в Telegram
+            TelegramPeer.objects.create(username=username, peer_type=TelegramPeer.PeerType.BOT, title=username,
+                                        fetched_at=timezone.now())
+
+    def bot_ad(self, bots=(), cpm=1000, url='https://t.me/kunuz', **overrides):
+        response = create_ad(self.owner_client, Placement.BOT, cpm=cpm, url=url,
+                             targeting={'bots': list(bots)}, **overrides)
+        self.assertEqual(response.status_code, 201, response.data)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(self.mod_client.post(f'/api/moderation/ads/{response.data["id"]}/approve/').status_code,
+                             200)
+        return Ad.objects.get(pk=response.data['id'])
+
+    def serve_bot(self, bot_username, user_id=1):
+        body = {'placement': 'BOT', 'user_id': user_id, 'context': {'bot_username': bot_username}}
+        return self.client.post('/api/ads/serve/', json.dumps(body), content_type='application/json',
+                                HTTP_X_API_KEY=API_KEY)
+
+    def served_in(self, bot_username, user_id=1):
+        """id объявления, выданного в чате бота, или None"""
+        response = self.serve_bot(bot_username, user_id)
+        self.assertEqual(response.status_code, 200, response.content)
+        ads = response.json()['ads']
+        return tokens.decode(ads[0]['random_id']).ad_id if ads else None
+
+    def test_only_in_selected_bots(self):
+        ad = self.bot_ad(bots=['t.me/weatherbot', '@newsbot'])
+        self.reload()
+        self.assertEqual(self.served_in('weatherbot'), str(ad.pk))
+        self.assertEqual(self.served_in('newsbot'), str(ad.pk))
+        self.assertIsNone(self.served_in('kinobot'))
+        self.assertIsNone(self.served_in('otherbot'))
+
+    def test_any_bot_when_none_selected(self):
+        ad = self.bot_ad(bots=[])
+        self.reload()
+        for bot in ('weatherbot', 'kinobot', 'somebodyelsesbot'):
+            self.assertEqual(self.served_in(bot), str(ad.pk), bot)
+
+    def test_selected_and_any_bot_compete_in_one_auction(self):
+        targeted = self.bot_ad(bots=['weatherbot'], cpm=1000)
+        anywhere = self.bot_ad(cpm=2000)
+        self.reload()
+        self.assertEqual(self.served_in('weatherbot', 1), str(anywhere.pk))  # «любые боты» дороже
+        self.assertEqual(self.served_in('kinobot', 1), str(anywhere.pk))
+        # Зрителю 1 дорогое уже показали (лимит 1 в сутки) — в чате weatherbot идёт следующее по ставке
+        token = self.serve_bot('weatherbot', 1).json()['ads'][0]['random_id']
+        self.assertEqual(self.sent(1, self.view(token)), (1, 0))
+        self.assertEqual(self.served_in('weatherbot', 1), str(targeted.pk))
+        self.assertIsNone(self.served_in('kinobot', 1))  # там кроме «любых ботов» никого
+
+        Ad.objects.filter(pk=targeted.pk).update(cpm=3000)  # выбравшее бота стало дороже
+        self.reload()
+        self.assertEqual(self.served_in('weatherbot', 2), str(targeted.pk))
+
+    def test_bot_username_forms(self):
+        ad = self.bot_ad(bots=['weatherbot'])
+        self.reload()
+        for form in ('weatherbot', 'WeatherBot', '@WEATHERBOT', 't.me/weatherbot', 'https://t.me/WeatherBot',
+                     ' @weatherbot '):
+            self.assertEqual(self.served_in(form), str(ad.pk), form)
+        for bad in ('', '   ', 'weather', '@kunuz', 'we ather bot', 'a' * 40 + 'bot', 123, None, ['weatherbot']):
+            self.assertEqual(self.serve_bot(bad).status_code, 400, bad)
+
+    def test_own_bot_not_advertised_in_its_chat(self):
+        own = self.bot_ad(url='https://t.me/weatherbot')  # продвигает weatherbot, боты не выбраны
+        self.reload()
+        self.assertIsNone(self.served_in('weatherbot'))
+        self.assertEqual(self.served_in('kinobot'), str(own.pk))
+        # Даже если сам выбрал свой бот
+        Ad.objects.filter(pk=own.pk).update(targeting={'bots': ['weatherbot', 'kinobot']})
+        self.reload()
+        self.assertIsNone(self.served_in('weatherbot'))
+        self.assertEqual(self.served_in('kinobot'), str(own.pk))
+
+    def test_show_channel_picture(self):
+        plain = self.bot_ad(bots=['weatherbot'])
+        TelegramPeer.objects.filter(username='kunuz').update(avatar='tg_avatars/kunuz_abcd1234.jpg')
+        self.reload()
+        item = self.serve_bot('weatherbot').json()['ads'][0]
+        self.assertEqual(set(item), {'random_id', 'placement', 'text', 'url', 'promoted', 'button_type', 'media',
+                                     'other_info', 'label'})
+        self.assertEqual((item['placement'], item['text'], item['url'], item['button_type'], item['media'],
+                          item['label']), (Placement.BOT, plain.text, plain.url, 'CHANNEL', None, 'Ad'))
+        self.assertIsNone(item['promoted']['avatar_url'])  # без «фото канала» — без аватара
+
+        Ad.objects.filter(pk=plain.pk).update(show_channel_picture=True)
+        self.reload()
+        item = self.serve_bot('weatherbot').json()['ads'][0]
+        self.assertEqual(item['promoted']['avatar_url'], 'http://testserver/media/tg_avatars/kunuz_abcd1234.jpg')
+
+    def test_promoted_bot_button(self):
+        self.bot_ad(url='https://t.me/newsbot')
+        self.reload()
+        item = self.serve_bot('kinobot').json()['ads'][0]
+        self.assertEqual((item['button_type'], item['promoted']['type'], item['promoted']['username']),
+                         ('BOT', 'BOT', 'newsbot'))
+
+    def test_zero_sql_and_events(self):
+        ad = self.bot_ad(bots=['weatherbot'])
+        self.reload()
+        with self.assertNumQueries(0):
+            token = self.serve_bot('weatherbot').json()['ads'][0]['random_id']
+            self.assertEqual(self.sent(1, self.view(token), self.click(token)), (2, 0))
+        self.assertEqual(tokens.decode(token).placement, Placement.BOT)
+        self.assertEqual(self.budget_left(ad), 10_000_000 - 1000)
+        self.flush()
+        stat = self.stat(ad)
+        self.assertEqual((stat.views, stat.clicks, stat.spent), (1, 1, Decimal('1')))

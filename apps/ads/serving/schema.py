@@ -13,10 +13,15 @@ SERVE_REQUEST = {
     'required': ['placement', 'user_id'],
     'properties': {
         'placement': {'type': 'string', 'enum': list(Placement.values),
-                      'description': 'Место показа. Пока работает только SEARCH, остальные отдают пустой список'},
+                      'description': 'Место показа. Работают SEARCH и BOT, остальные пока отдают пустой список'},
         'user_id': USER_ID,
-        'context': {'type': 'object', 'description': 'Для SEARCH: {"query": "строка поиска"}',
-                    'properties': {'query': {'type': 'string', 'maxLength': 256}}},
+        'context': {'type': 'object',
+                    'description': 'SEARCH: {"query": "строка поиска"}; '
+                                   'BOT: {"bot_username": "имя бота, в чате которого плашка"}',
+                    'properties': {
+                        'query': {'type': 'string', 'maxLength': 256},
+                        'bot_username': {'type': 'string', 'description': 'Без @ или с @, регистр не важен'},
+                    }},
         'lang': {'type': 'string', 'maxLength': 64},
         'platform': {'type': 'string', 'maxLength': 64},
         'app_version': {'type': 'string', 'maxLength': 64},
@@ -61,7 +66,7 @@ AD = {
 SERVE_RESPONSE = {
     'type': 'object',
     'properties': {
-        'ads': {'type': 'array', 'items': AD, 'description': 'Поиск — не больше одного объявления'},
+        'ads': {'type': 'array', 'items': AD, 'description': 'Поиск и боты — не больше одного объявления'},
         'ttl_seconds': {'type': 'integer', 'description': 'Сколько клиент кэширует ответ'},
     },
 }
