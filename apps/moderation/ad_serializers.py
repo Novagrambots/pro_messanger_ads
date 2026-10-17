@@ -1,7 +1,9 @@
+from collections import Counter
+
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from apps.ads.models import AdDecision, AdRevision
+from apps.ads.models import Ad, AdDecision, AdReport, AdRevision
 from apps.ads.serializers import AdMediaBriefSerializer, AdRevisionSerializer, AdSerializer
 
 
@@ -78,3 +80,31 @@ class ModerationRevisionSerializer(serializers.ModelSerializer):
     @extend_schema_field(CreativeSerializer)
     def get_proposed(self, obj):
         return self._creative(obj)
+
+
+class AdReportSerializer(serializers.ModelSerializer):
+    """Одна жалоба зрителя (кто пожаловался — не показываем)"""
+    reviewed_by = serializers.CharField(source='reviewed_by.username', default=None, read_only=True)
+
+    class Meta:
+        model = AdReport
+        fields = ['id', 'reason', 'details', 'status', 'created_at', 'reviewed_by', 'reviewed_at']
+        read_only_fields = fields
+
+
+class AdReportGroupSerializer(serializers.ModelSerializer):
+    """Жалобы, сгруппированные по объявлению: объявление, сколько жалоб, по каким причинам, сами жалобы"""
+    owner = AdOwnerSerializer(source='user', read_only=True)
+    reports_count = serializers.IntegerField(read_only=True)
+    last_report_at = serializers.DateTimeField(read_only=True)
+    reasons = serializers.SerializerMethodField(help_text='Причина → сколько жалоб')
+    reports = AdReportSerializer(source='listed_reports', many=True, read_only=True)
+
+    class Meta:
+        model = Ad
+        fields = ['id', 'title', 'placement', 'status', 'url', 'owner', 'reports_count', 'reasons',
+                  'last_report_at', 'reports']
+        read_only_fields = fields
+
+    def get_reasons(self, obj) -> dict[str, int]:
+        return dict(Counter(report.reason for report in obj.listed_reports))

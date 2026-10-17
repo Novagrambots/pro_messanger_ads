@@ -1,5 +1,6 @@
 """
-Горячий путь выдачи — простые Django-вьюхи с JSON (без DRF и без запросов к Postgres).
+Горячий путь выдачи — простые Django-вьюхи с JSON (без DRF). serve и events не ходят в Postgres;
+жалобы редкие — их пишем в Postgres сразу.
 Доступ — X-API-Key (сравнение за постоянное время) + лимиты запросов в Redis.
 """
 import json
@@ -14,7 +15,7 @@ from django.utils.crypto import constant_time_compare
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from apps.ads.models import Placement
+from apps.ads.models import Ad, AdReport, Placement
 
 from . import events as ad_events
 from . import selection, snapshot
@@ -24,6 +25,7 @@ from . import tokens
 logger = logging.getLogger(__name__)
 
 MAX_QUERY_LENGTH = 256
+MAX_REPORT_DETAILS = 500
 CLIENT_FIELDS = ('lang', 'platform', 'app_version')  # принимаем, для поиска пока не используются
 _last_outage_log = 0.0
 
@@ -148,3 +150,41 @@ def events(request):
         _log_outage('Приём событий объявлений недоступен')
         return _error('Приём событий временно недоступен, пришлите позже', 503)
     return JsonResponse({'accepted': accepted, 'rejected': rejected})
+
+
+@csrf_exempt
+@require_POST
+def report(request):
+    """POST /api/ads/report/ — жалоба зрителя на показанное объявление (одна от зрителя на объявление)"""
+    data, viewer, error = _parse(request)
+    if error:
+        return error
+
+    reason = data.get('reason')
+    if reason not in AdReport.Reason.values:
+        return _error(f'reason — одно из: {", ".join(AdReport.Reason.values)}', 400)
+    details = data.get('details') or ''
+    if not isinstance(details, str) or len(details) > MAX_REPORT_DETAILS:
+        return _error(f'details — строка до {MAX_REPORT_DETAILS} символов', 400)
+    token = tokens.decode(data.get('random_id'))
+    if token is None or token.viewer != viewer:
+        return _error('random_id недействителен или просрочен', 400)
+
+    try:
+        if S.over_rate_limit([('report', viewer, settings.ADS_RATE_VIEWER_REPORTS),
+                              ('ip', _client_ip(request), settings.ADS_RATE_IP)]):
+            return _error('Слишком много запросов', 429)
+    except redis.RedisError:
+        # Без Redis лимит не проверить — жалобу всё равно принимаем (их мало, одна от зрителя на объявление)
+        _log_outage('Лимит жалоб не проверен: Redis выдачи недоступен')
+
+    try:
+        if not Ad.objects.filter(pk=token.ad_id).exists():
+            return _error('Объявление не найдено', 404)
+        _, created = AdReport.objects.get_or_create(
+            ad_id=token.ad_id, viewer_key=viewer, defaults={'reason': reason, 'details': details.strip()})
+    except DatabaseError:
+        _log_outage('Жалоба не сохранена: база недоступна')
+        return _error('Жалобы временно не принимаются, попробуйте позже', 503)
+    # Повторная жалоба того же зрителя — не ошибка: первая уже у модератора
+    return JsonResponse({'reported': True}, status=201 if created else 200)

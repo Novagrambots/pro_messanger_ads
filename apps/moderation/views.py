@@ -5,7 +5,7 @@ from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.ads.models import Ad, AdRevision, AdStatus
+from apps.ads.models import Ad, AdReport, AdRevision, AdStatus
 from apps.billing.services import format_money
 from apps.common.models import ModerationStatus
 from apps.common.pagination import StandardResultsSetPagination
@@ -120,7 +120,8 @@ class PendingCountView(APIView):
                 "total": {"type": "integer", "description": "Только старые заказы (search_ads + chat_ads)"},
                 "ads": {"type": "integer", "description": "Объявления v2 на модерации"},
                 "ad_revisions": {"type": "integer", "description": "Правки креатива на проверке"},
-                "total_all": {"type": "integer", "description": "Все очереди, включая ads и ad_revisions"},
+                "ad_reports": {"type": "integer", "description": "Новые жалобы зрителей на объявления"},
+                "total_all": {"type": "integer", "description": "Все очереди, включая ads, ad_revisions и ad_reports"},
             }
         }
     })
@@ -129,6 +130,7 @@ class PendingCountView(APIView):
         chat_count = ChatAdOrder.objects.filter(status=ModerationStatus.PENDING, cancelled=False).count()
         ads_count = Ad.objects.filter(status=AdStatus.IN_REVIEW).count()
         revisions_count = AdRevision.objects.filter(status=AdRevision.Status.PENDING).count()
+        reports_count = AdReport.objects.filter(status=AdReport.Status.NEW).count()
         return Response({
             'search_ads': search_count,
             'chat_ads': chat_count,
@@ -136,7 +138,8 @@ class PendingCountView(APIView):
             'total': search_count + chat_count,
             'ads': ads_count,
             'ad_revisions': revisions_count,
-            'total_all': search_count + chat_count + ads_count + revisions_count,
+            'ad_reports': reports_count,
+            'total_all': search_count + chat_count + ads_count + revisions_count + reports_count,
         }, status=status.HTTP_200_OK)
 
 

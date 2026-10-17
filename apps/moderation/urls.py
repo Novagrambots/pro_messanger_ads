@@ -1,7 +1,8 @@
 from django.urls import path
 
-from .ad_views import (AllAdsListView, ApproveAdView, ApproveRevisionView, BlockAdView, DeclineAdView,
-                       DeclineRevisionView, ModerationAdDetailView, PendingAdsListView, PendingRevisionsListView)
+from .ad_views import (AdReportsListView, AllAdsListView, ApproveAdView, ApproveRevisionView, BlockAdView,
+                       DeclineAdView, DeclineRevisionView, ModerationAdDetailView, PendingAdsListView,
+                       PendingRevisionsListView, ReviewAdReportView)
 from .views import (PendingSearchAdsListView, PendingChatAdsListView, PendingCountView,
                     ApproveOrderView, RejectOrderView, BlockOrderView,
                     AllSearchAdsListView, AllChatAdsListView)
@@ -15,6 +16,8 @@ urlpatterns = [
     path('ads/revisions/pending/', PendingRevisionsListView.as_view(), name='moderation-ad-revisions-pending'),
     path('ads/revisions/<uuid:pk>/approve/', ApproveRevisionView.as_view(), name='moderation-ad-revision-approve'),
     path('ads/revisions/<uuid:pk>/decline/', DeclineRevisionView.as_view(), name='moderation-ad-revision-decline'),
+    path('ads/reports/', AdReportsListView.as_view(), name='moderation-ad-reports'),
+    path('ads/reports/<uuid:pk>/review/', ReviewAdReportView.as_view(), name='moderation-ad-report-review'),
     path('ads/<uuid:pk>/', ModerationAdDetailView.as_view(), name='moderation-ads-detail'),
     path('ads/<uuid:pk>/approve/', ApproveAdView.as_view(), name='moderation-ads-approve'),
     path('ads/<uuid:pk>/decline/', DeclineAdView.as_view(), name='moderation-ads-decline'),

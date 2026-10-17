@@ -12,8 +12,12 @@ services:
     container_name: stg_db
   redis:
     container_name: stg_redis
+  redis_ads:
+    container_name: stg_redis_ads
   web:
     container_name: stg_web
+  serving:
+    container_name: stg_serving
   celery_worker:
     container_name: stg_worker
   celery_flush:

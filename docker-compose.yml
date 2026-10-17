@@ -24,6 +24,19 @@ services:
     container_name: channel_redis
     restart: unless-stopped
 
+  # Redis выдачи объявлений v2: бюджеты, счётчики показов, несброшенные траты (деньги!).
+  # AOF раз в секунду — после рестарта данные на месте; noeviction — при переполнении памяти
+  # Redis отказывает в записи, а не выкидывает ключи бюджета. Отдельно от брокера Celery и кэша
+  redis_ads:
+    image: redis:7-alpine
+    container_name: channel_redis_ads
+    command: >
+      redis-server --appendonly yes --appendfsync everysec
+      --maxmemory ${ADS_REDIS_MAXMEMORY:-8gb} --maxmemory-policy noeviction
+    volumes:
+      - redis_ads_data:/data
+    restart: unless-stopped
+
   web:
     build: .
     container_name: channel_web_2
@@ -50,11 +63,44 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - CACHE_REDIS_URL=redis://redis:6379/1  # общий кэш Django (справочники, троттлинг)
+      - ADS_REDIS_URL=redis://redis_ads:6379/0  # выдача v2: возвраты и пополнения сначала сбрасывают показы
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_started
+      redis_ads:
+        condition: service_started
+    restart: unless-stopped
+
+  # Горячий путь выдачи объявлений v2 (/api/ads/serve|events|report/) — отдельно от web, чтобы
+  # пик запросов рекламы не съедал воркеры кабинета и модерации. Тот же образ, только эти URL.
+  # Ядра, воркеры и потоки — из .env (SERVING_CPUS / SERVING_WORKERS / SERVING_THREADS)
+  serving:
+    build: .
+    container_name: channel_serving
+    command: >
+      gunicorn --bind 0.0.0.0:9100 --worker-class gthread
+      --workers ${SERVING_WORKERS:-8} --threads ${SERVING_THREADS:-4} --timeout 30
+      core.wsgi:application
+    cpus: ${SERVING_CPUS:-8}
+    ulimits:
+      nofile:
+        soft: 16384
+        hard: 16384
+    env_file:
+      - .env
+    environment:
+      - SERVING_ONLY=True
+      - DATABASES_CONN_MAX_AGE=0  # в базу — только снимок объявлений раз в 30 с и редкие жалобы
+      - ADS_REDIS_URL=redis://redis_ads:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CACHE_REDIS_URL=redis://redis:6379/1
+    depends_on:
+      - db
+      - redis_ads
+      - web  # миграции применяет web
     restart: unless-stopped
 
   celery_worker:
@@ -80,9 +126,11 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - CACHE_REDIS_URL=redis://redis:6379/1  # общий кэш Django (справочники, троттлинг)
+      - ADS_REDIS_URL=redis://redis_ads:6379/0
     depends_on:
       - db
       - redis
+      - redis_ads
       - web # Чтобы миграции точно прошли до запуска воркера
     restart: unless-stopped
 
@@ -104,9 +152,11 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - CACHE_REDIS_URL=redis://redis:6379/1
+      - ADS_REDIS_URL=redis://redis_ads:6379/0
     depends_on:
       - db
       - redis
+      - redis_ads
       - web # миграции применяет web
     restart: unless-stopped
 
@@ -121,6 +171,7 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - CACHE_REDIS_URL=redis://redis:6379/1  # общий кэш Django (справочники, троттлинг)
+      - ADS_REDIS_URL=redis://redis_ads:6379/0
     depends_on:
       - db
       - redis
@@ -139,9 +190,11 @@ services:
       - media_volume:/app/media:ro
     depends_on:
       - web
+      - serving
     restart: unless-stopped
 
 volumes:
   postgres_data:
   static_volume:
   media_volume:
+  redis_ads_data:

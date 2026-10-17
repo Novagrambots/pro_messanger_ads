@@ -654,3 +654,54 @@ class FlushBatch(models.Model):
 
     def __str__(self):
         return f'{self.id} ({self.ads_count})'
+
+
+class AdReport(models.Model):
+    """
+    Жалоба зрителя на объявление (из приложения, POST /api/ads/report/). Одна жалоба от зрителя
+    на объявление. Сырой id пользователя не храним — только viewer_key (HMAC).
+    Модератор помечает жалобу просмотренной; заблокировать объявление — обычным block.
+    """
+
+    class Reason(models.TextChoices):
+        SPAM = 'spam', 'Спам'
+        VIOLENCE = 'violence', 'Насилие'
+        PORNOGRAPHY = 'pornography', 'Порнография'
+        ILLEGAL = 'illegal', 'Незаконное'
+        MISLEADING = 'misleading', 'Обман'
+        OTHER = 'other', 'Другое'
+
+    class Status(models.TextChoices):
+        NEW = 'NEW', 'Новая'
+        REVIEWED = 'REVIEWED', 'Просмотрена'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ad = models.ForeignKey(Ad, on_delete=models.CASCADE, related_name='reports', verbose_name='Объявление')
+    viewer_key = models.CharField('Зритель (HMAC)', max_length=32)
+    reason = models.CharField('Причина', max_length=16, choices=Reason.choices)
+    details = models.CharField('Подробности', max_length=500, blank=True, default='')
+    status = models.CharField('Статус', max_length=10, choices=Status.choices, default=Status.NEW, db_index=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+                                    related_name='+', verbose_name='Кто просмотрел')
+    reviewed_at = models.DateTimeField('Когда просмотрели', null=True, blank=True)
+    created_at = models.DateTimeField('Создана', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Жалоба на объявление'
+        verbose_name_plural = 'Жалобы на объявления'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['ad', 'viewer_key'], name='ad_report_one_per_viewer'),
+        ]
+
+    def __str__(self):
+        return f'{self.get_reason_display()} — {self.ad_id} ({self.get_status_display()})'
+
+    def mark_reviewed(self, moderator):
+        """Только под select_for_update: NEW → REVIEWED"""
+        if self.status != self.Status.NEW:
+            raise AdStateError('Жалоба уже просмотрена')
+        self.status = self.Status.REVIEWED
+        self.reviewed_by = moderator
+        self.reviewed_at = timezone.now()
+        self.save(update_fields=['status', 'reviewed_by', 'reviewed_at'])

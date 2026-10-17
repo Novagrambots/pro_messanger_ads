@@ -1,7 +1,8 @@
 from django.contrib import admin, messages
 from django.db import transaction
 
-from apps.ads.models import Ad, AdDailyStat, AdDecision, AdMedia, AdPricing, AdRevision, AdStateError
+from apps.ads.models import (Ad, AdDailyStat, AdDecision, AdMedia, AdPricing, AdReport, AdRevision,
+                             AdStateError)
 from apps.ads.serving.store import ServingUnavailable
 
 
@@ -154,3 +155,23 @@ class AdMediaAdmin(admin.ModelAdmin):
     def has_view_permission(self, request, obj=None):
         return request.user.is_superuser
 
+
+@admin.register(AdReport)
+class AdReportAdmin(admin.ModelAdmin):
+    """Жалобы зрителей — только просмотр (пометить просмотренной — через API модерации)"""
+    list_display = ('ad', 'reason', 'status', 'details', 'created_at', 'reviewed_by')
+    list_filter = ('status', 'reason')
+    search_fields = ('ad__title', 'details')
+    list_select_related = ('ad', 'reviewed_by')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_superuser

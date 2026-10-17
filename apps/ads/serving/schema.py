@@ -1,8 +1,8 @@
 """
-Описание горячего пути выдачи в Swagger. Вьюхи — простые Django (не DRF), drf-spectacular их
-не видит, поэтому пути добавляет этот хук (SPECTACULAR_SETTINGS['POSTPROCESSING_HOOKS']).
+Описание горячего пути выдачи (serve, events, report) в Swagger. Вьюхи — простые Django (не DRF),
+drf-spectacular их не видит, поэтому пути добавляет этот хук (SPECTACULAR_SETTINGS['POSTPROCESSING_HOOKS']).
 """
-from apps.ads.models import Placement
+from apps.ads.models import AdReport, Placement
 
 USER_ID = {'type': 'integer', 'format': 'int64', 'description': 'Числовой id пользователя Telegram. '
            'На сервере не хранится — только HMAC от него'}
@@ -92,9 +92,22 @@ EVENTS_RESPONSE = {
     'properties': {'accepted': {'type': 'integer'}, 'rejected': {'type': 'integer'}},
 }
 
+REPORT_REQUEST = {
+    'type': 'object',
+    'required': ['user_id', 'random_id', 'reason'],
+    'properties': {
+        'user_id': USER_ID,
+        'random_id': {'type': 'string', 'description': 'random_id показанного объявления (живёт 1 час)'},
+        'reason': {'type': 'string', 'enum': list(AdReport.Reason.values)},
+        'details': {'type': 'string', 'maxLength': 500},
+    },
+}
 
-def _operation(operation_id, summary, description, request, ok, extra):
-    responses = {'200': {'description': '', 'content': {'application/json': {'schema': ok}}}}
+REPORT_RESPONSE = {'type': 'object', 'properties': {'reported': {'type': 'boolean'}}}
+
+
+def _operation(operation_id, summary, description, request, ok, extra, ok_codes=('200',)):
+    responses = {code: {'description': '', 'content': {'application/json': {'schema': ok}}} for code in ok_codes}
     for code, text in {'400': 'Неверное тело запроса', '403': 'Неверный или отсутствующий X-API-Key',
                        '429': 'Лимит запросов (на зрителя или IP) в минуту', **extra}.items():
         responses[code] = {'description': text, 'content': {'application/json': {'schema': ERROR}}}
@@ -120,6 +133,12 @@ PATHS = {
         'До 50 событий в пачке, каждое обрабатывается отдельно. Один view и один click на random_id; '
         'токен другого пользователя или просроченный — отклоняется. 503 — пришлите пачку позже.',
         EVENTS_REQUEST, EVENTS_RESPONSE, {'503': 'Приём событий временно недоступен'}),
+    '/api/ads/report/': _operation(
+        'ads_report', 'Жалоба на объявление',
+        'Одна жалоба от пользователя на объявление: 201 — принята, 200 — уже была. '
+        'random_id — из выдачи этому же пользователю, не старше часа.',
+        REPORT_REQUEST, REPORT_RESPONSE, {'404': 'Объявление не найдено', '503': 'Жалобы временно не принимаются'},
+        ok_codes=('201', '200')),
 }
 
 

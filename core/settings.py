@@ -76,7 +76,9 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-ROOT_URLCONF = 'core.urls'
+# Сервис serving (docker-compose) отдаёт только горячий путь выдачи — свой набор URL
+SERVING_ONLY = os.getenv('SERVING_ONLY', 'False') == 'True'
+ROOT_URLCONF = 'core.urls_serving' if SERVING_ONLY else 'core.urls'
 
 TEMPLATES = [
     {
@@ -109,7 +111,8 @@ DATABASES = {
         'PORT': os.getenv('DATABASES_PORT', '5432'),
         # Переиспользуем соединение до 60с вместо open/close на каждый запрос
         # (меньше latency и нагрузки на Postgres при высоком RPS).
-        'CONN_MAX_AGE': 60,
+        # У serving — 0: там в базу ходят только снимок объявлений (раз в 30 с) и редкие жалобы
+        'CONN_MAX_AGE': int(os.getenv('DATABASES_CONN_MAX_AGE', '60')),
         # Проверяем живость переиспользуемого соединения перед запросом.
         'CONN_HEALTH_CHECKS': True,
     }
@@ -247,6 +250,8 @@ SPECTACULAR_SETTINGS = {
         'AdStatusEnum': 'apps.ads.models.AdStatus',
         'AdInitialStatusEnum': 'apps.ads.models.InitialStatus',
         'AdRevisionStatusEnum': 'apps.ads.models.AdRevision.Status',
+        'AdReportStatusEnum': 'apps.ads.models.AdReport.Status',
+        'AdReportReasonEnum': 'apps.ads.models.AdReport.Reason',
         'MoneyOperationStatusEnum': 'apps.billing.models.MoneyOperation.Status',
         'StatusEnum': 'apps.common.models.ModerationStatus',  # старое имя у старых заказов — не меняем
     },
@@ -331,9 +336,10 @@ ADS_TOKEN_SECRET = os.getenv('ADS_TOKEN_SECRET', '')
 ADS_CACHE_TTL = int(os.getenv('ADS_CACHE_TTL', '300'))    # сколько клиент кэширует ответ, с
 ADS_EMPTY_TTL = int(os.getenv('ADS_EMPTY_TTL', '60'))     # то же, когда выдача недоступна (Redis лежит)
 ADS_TOKEN_TTL = int(os.getenv('ADS_TOKEN_TTL', '3600'))   # срок жизни random_id, с
-# Лимиты запросов в минуту: на зрителя (запрос рекламы и события отдельно) и на IP
+# Лимиты запросов в минуту: на зрителя (запрос рекламы, события, жалобы — отдельно) и на IP
 ADS_RATE_VIEWER_SERVE = int(os.getenv('ADS_RATE_VIEWER_SERVE', '60'))
 ADS_RATE_VIEWER_EVENTS = int(os.getenv('ADS_RATE_VIEWER_EVENTS', '60'))
+ADS_RATE_VIEWER_REPORTS = int(os.getenv('ADS_RATE_VIEWER_REPORTS', '10'))
 ADS_RATE_IP = int(os.getenv('ADS_RATE_IP', '1200'))
 # Фоновый поток, который держит снимок объявлений свежим (в тестах выключен — снимок грузят явно)
 ADS_SNAPSHOT_THREAD = not TESTING and os.getenv('ADS_SNAPSHOT_THREAD', 'True') == 'True'

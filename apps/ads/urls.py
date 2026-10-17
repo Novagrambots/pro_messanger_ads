@@ -12,6 +12,7 @@ urlpatterns = [
     # Горячий путь выдачи (простые Django-вьюхи, X-API-Key)
     path('serve/', serving.serve, name='ads-serve'),
     path('events/', serving.events, name='ads-events'),
+    path('report/', serving.report, name='ads-report'),
     path('media/', AdMediaUploadView.as_view(), name='ads-media-upload'),
     path('media/<uuid:pk>/', AdMediaDetailView.as_view(), name='ads-media-detail'),
     path('directories/', include('apps.directories.urls')),

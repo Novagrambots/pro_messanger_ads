@@ -1,7 +1,7 @@
 """
 Тесты выдачи v2 (apps/ads/serving) на настоящем Redis: выбор, токены, события, сброс в Postgres,
 заморозка перед возвратом, ноль SQL на горячем пути, гонка параллельных показов в потоках,
-порядок блокировок «объявление → баланс», очереди Celery.
+порядок блокировок «объявление → баланс», очереди Celery, жалобы зрителей и сервис serving.
 Redis — ADS_REDIS_TEST_URL (по умолчанию redis://localhost:6379/15), очищается перед каждым тестом.
 """
 import json
@@ -20,7 +20,7 @@ from django.db import connection, transaction
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
-from apps.ads.models import Ad, AdDailyStat, AdStatus, FlushBatch, Placement
+from apps.ads.models import Ad, AdDailyStat, AdReport, AdStatus, FlushBatch, Placement
 from apps.ads.serving import events, flush as flushing, selection, snapshot, store as S, tokens
 from apps.ads.serving import views as serving_views
 from apps.ads.tests import KUNUZ_ID, client_for, create_ad, make_local_user, setUpModule, tearDownModule  # noqa: F401
@@ -782,6 +782,110 @@ class RaceTests(ServingBase):
         self.assertEqual(stat.views + stat.free_views, self.THREADS * self.VIEWS_EACH)
         self.assertEqual(Balance.objects.get(user=self.owner).amount, before + ad.refunded)
         self.assert_redis_clean()
+
+
+class ReportTests(ServingBase):
+    """Жалобы зрителей: приём из приложения, очередь модератора, «просмотрено», счётчик"""
+
+    def setUp(self):
+        super().setUp()
+        self.ad = self.active_ad()
+
+    def report(self, user_id=1, random_id=None, reason='spam', **extra):
+        body = {'user_id': user_id, 'random_id': random_id or self.token(self.ad, user_id), 'reason': reason, **extra}
+        return self.client.post('/api/ads/report/', json.dumps(body), content_type='application/json',
+                                HTTP_X_API_KEY=API_KEY)
+
+    def test_report_once_per_viewer(self):
+        response = self.report(123456789, details='  Обман  ')
+        self.assertEqual((response.status_code, response.json()), (201, {'reported': True}))
+        self.assertEqual(self.report(123456789, reason='other').status_code, 200)  # повтор — не ошибка
+        report = AdReport.objects.get()
+        self.assertEqual((report.ad_id, report.reason, report.details, report.status),
+                         (self.ad.pk, 'spam', 'Обман', AdReport.Status.NEW))
+        self.assertEqual(report.viewer_key, tokens.viewer_key(123456789))  # сырой id не храним
+        self.assertEqual(self.report(2).status_code, 201)  # другой зритель — своя жалоба
+        self.assertEqual(AdReport.objects.count(), 2)
+
+    def test_bad_reports(self):
+        self.assertEqual(self.report(reason='boring').status_code, 400)
+        self.assertEqual(self.report(details='x' * 501).status_code, 400)
+        self.assertEqual(self.report(details=5).status_code, 400)
+        self.assertEqual(self.report(user_id=2, random_id=self.token(self.ad, 1)).status_code, 400)  # чужой токен
+        self.assertEqual(self.report(random_id='forged').status_code, 400)
+        expired = tokens.issue(str(self.ad.pk), tokens.viewer_key(1), Placement.SEARCH, b'\0' * 8,
+                               now=time.time() - settings.ADS_TOKEN_TTL - 5)
+        self.assertEqual(self.report(random_id=expired).status_code, 400)
+        response = self.client.post('/api/ads/report/', '{}', content_type='application/json')
+        self.assertEqual(response.status_code, 403)  # без X-API-Key
+        self.assertFalse(AdReport.objects.exists())
+
+    def test_report_rate_limit(self):
+        other = self.active_ad()
+        with override_settings(ADS_RATE_VIEWER_REPORTS=1):
+            self.assertEqual(self.report(1).status_code, 201)
+            self.assertEqual(self.report(1, random_id=self.token(other, 1)).status_code, 429)
+
+    def test_moderator_queue_grouped_by_ad(self):
+        other = self.active_ad()
+        for user_id, reason in ((1, 'spam'), (2, 'spam'), (3, 'misleading')):
+            self.report(user_id, reason=reason)
+        self.report(4, random_id=self.token(other, 4), reason='illegal')
+
+        data = self.mod_client.get('/api/moderation/ads/reports/').data
+        self.assertEqual(data['count'], 2)
+        first, second = data['results']
+        self.assertEqual((first['id'], first['reports_count'], first['reasons']),
+                         (str(self.ad.pk), 3, {'spam': 2, 'misleading': 1}))  # больше жалоб — выше
+        self.assertEqual(first['owner']['username'], 'owner')
+        self.assertEqual(len(first['reports']), 3)
+        self.assertNotIn('viewer_key', first['reports'][0])
+        self.assertEqual((second['id'], second['reports_count']), (str(other.pk), 1))
+
+        pending = self.mod_client.get('/api/moderation/pending_count/').data
+        self.assertEqual(pending['ad_reports'], 4)
+        self.assertEqual(pending['total_all'], pending['ads'] + pending['ad_revisions'] + pending['total'] + 4)
+
+        # Просмотрели одну жалобу — она уходит из фильтра NEW
+        report_id = first['reports'][0]['id']
+        response = self.mod_client.post(f'/api/moderation/ads/reports/{report_id}/review/')
+        self.assertEqual((response.status_code, response.data['status']), (200, AdReport.Status.REVIEWED))
+        self.assertEqual(self.mod_client.post(f'/api/moderation/ads/reports/{report_id}/review/').status_code, 409)
+        new = self.mod_client.get('/api/moderation/ads/reports/?status=NEW').data['results']
+        self.assertEqual([(group['id'], group['reports_count']) for group in new],
+                         [(str(self.ad.pk), 2), (str(other.pk), 1)])
+        reviewed = self.mod_client.get('/api/moderation/ads/reports/?status=REVIEWED').data['results']
+        self.assertEqual(reviewed[0]['reports'][0]['reviewed_by'], self.moderator.username)
+        self.assertEqual(self.mod_client.get('/api/moderation/pending_count/').data['ad_reports'], 3)
+
+    def test_permissions(self):
+        self.report(1)
+        report = AdReport.objects.get()
+        self.assertEqual(self.owner_client.get('/api/moderation/ads/reports/').status_code, 403)
+        self.assertEqual(self.owner_client.post(f'/api/moderation/ads/reports/{report.pk}/review/').status_code, 403)
+        # Жалобы на своё объявление модератор не разбирает
+        own = AdReport.objects.create(ad=self.ad, viewer_key='0' * 32, reason='spam')
+        Ad.objects.filter(pk=self.ad.pk).update(user=self.moderator)
+        self.assertEqual(self.mod_client.post(f'/api/moderation/ads/reports/{own.pk}/review/').status_code, 403)
+
+
+@override_settings(ROOT_URLCONF='core.urls_serving')
+class ServingUrlconfTests(ServingBase):
+    """Сервис serving (SERVING_ONLY=True) отдаёт только горячий путь"""
+
+    def test_only_hot_path(self):
+        with override_settings(ROOT_URLCONF='core.urls'):  # объявление создаём через кабинет и модерацию
+            ad = self.active_ad()
+        self.reload()
+        served = self.serve_ad()
+        self.assertIsNotNone(served)
+        self.assertEqual(self.sent(1, self.view(served['random_id'])), (1, 0))
+        report = self.client.post('/api/ads/report/', json.dumps({
+            'user_id': 1, 'random_id': served['random_id'], 'reason': 'spam'}),
+            content_type='application/json', HTTP_X_API_KEY=API_KEY)
+        self.assertEqual(report.status_code, 201)
+        for path in ('/api/ads/', f'/api/ads/{ad.pk}/', '/admin/', '/api/moderation/ads/reports/', '/api/docs/'):
+            self.assertEqual(self.client.get(path).status_code, 404, path)
 
 
 def require_redis():
