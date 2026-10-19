@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 
 from django.utils import timezone
@@ -5,8 +6,8 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from apps.ads import stats, validators
-from apps.ads.models import (MEDIA_PLACEMENTS, TABLE_COLUMNS, ActionType, Ad, AdMedia, AdPricing, AdRevision,
-                             AdStateError, InitialStatus, Placement, default_schedule)
+from apps.ads.models import (MEDIA_PLACEMENTS, TABLE_COLUMNS, ActionType, Ad, AdDraft, AdMedia, AdPricing,
+                             AdRevision, AdStateError, InitialStatus, Placement, default_schedule)
 from apps.billing.models import MoneyOperation
 from apps.billing.services import charge, check_budget, format_money
 from apps.directories.serializers import TelegramPeerSerializer
@@ -269,6 +270,7 @@ class AdCreateSerializer(serializers.Serializer):
             ad = Ad(user=user, budget=budget, terms_version=pricing.terms_version,
                     terms_accepted_at=timezone.now(), **validated_data)
             ad.submit()  # на модерацию (у суперадмина — сразу одобрено)
+            AdDraft.objects.filter(user=user).delete()  # объявление создано — черновик больше не нужен
             return ad
 
         return charge(user, paid, MoneyOperation.OrderType.ADS, create_ad)
@@ -416,3 +418,19 @@ class AdTableSettingsSerializer(serializers.Serializer):
 
     def validate_columns(self, value):
         return list(dict.fromkeys(value))  # без дублей, порядок сохраняем
+
+
+DRAFT_MAX_BYTES = 64 * 1024
+
+
+class AdDraftSerializer(serializers.Serializer):
+    """Черновик формы: поля внутри не проверяем (форма бывает незаконченной) — только объект и размер"""
+    data = serializers.JSONField(allow_null=True, help_text='Содержимое формы создания как есть; null — черновика нет')
+    updated_at = serializers.DateTimeField(read_only=True, allow_null=True)
+
+    def validate_data(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('Черновик — JSON-объект')
+        if len(json.dumps(value, ensure_ascii=False).encode()) > DRAFT_MAX_BYTES:
+            raise serializers.ValidationError('Черновик больше 64 КБ')
+        return value

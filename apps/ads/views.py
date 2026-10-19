@@ -10,14 +10,15 @@ from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import generics, permissions, serializers, status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.views import APIView
 
 from apps.ads import stats
 from apps.ads.media import MediaError, save_upload
-from apps.ads.models import (DEFAULT_TABLE_COLUMNS, TABLE_COLUMNS, Ad, AdMedia, AdPricing, AdRevision, AdStateError,
-                             AdStatus, AdTableSettings)
-from apps.ads.serializers import (AdBudgetTopUpSerializer, AdCreateSerializer, AdMediaSerializer, AdPricingSerializer,
-                                  AdSerializer, AdTableSettingsSerializer, AdUpdateSerializer,
+from apps.ads.models import (DEFAULT_TABLE_COLUMNS, TABLE_COLUMNS, Ad, AdDraft, AdMedia, AdPricing, AdRevision,
+                             AdStateError, AdStatus, AdTableSettings)
+from apps.ads.serializers import (AdBudgetTopUpSerializer, AdCreateSerializer, AdDraftSerializer, AdMediaSerializer,
+                                  AdPricingSerializer, AdSerializer, AdTableSettingsSerializer, AdUpdateSerializer,
                                   BudgetOperationSerializer)
 from apps.ads.serving.store import ServingUnavailable
 from apps.billing.models import MoneyOperation
@@ -228,6 +229,58 @@ class AdTableSettingsView(APIView):
         columns = serializer.validated_data['columns']
         AdTableSettings.objects.update_or_create(user=request.user, defaults={'columns': columns})
         return Response(self.payload(columns))
+
+
+def draft_payload(draft):
+    if draft is None:
+        return {'data': None, 'updated_at': None}
+    return AdDraftSerializer(draft).data
+
+
+class DraftThrottle(UserRateThrottle):
+    scope = 'ads_draft'  # 60 в минуту на пользователя (settings.DEFAULT_THROTTLE_RATES)
+
+
+class AdDraftView(APIView):
+    """Черновик формы создания (один на пользователя, как у Telegram): фронт сохраняет через 3 с после изменений"""
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [DraftThrottle]
+
+    @extend_schema(responses={200: AdDraftSerializer})
+    def get(self, request):
+        return Response(draft_payload(AdDraft.objects.filter(user=request.user).first()))
+
+    @extend_schema(request=AdDraftSerializer, responses={200: AdDraftSerializer, 400: STATE_ERROR_RESPONSE})
+    def put(self, request):
+        serializer = AdDraftSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        draft, _ = AdDraft.objects.update_or_create(user=request.user,
+                                                    defaults={'data': serializer.validated_data['data']})
+        return Response(draft_payload(draft))
+
+    @extend_schema(responses={204: None})
+    def delete(self, request):
+        """Clear Draft (черновика нет — тоже 204)"""
+        AdDraft.objects.filter(user=request.user).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AdCopyToDraftView(generics.GenericAPIView):
+    """
+    «Create a similar ad»: поля объявления → черновик формы создания (прежний черновик заменяется).
+    Не копируются деньги (budget), статусы, даты и согласие с правилами
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = AdDraftSerializer
+
+    def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False):
+            return Ad.objects.none()
+        return own_ads(self.request.user).select_related('promoted_peer')
+
+    @extend_schema(request=None, responses={200: AdDraftSerializer, 404: ERROR_RESPONSE})
+    def post(self, request, pk):
+        return Response(draft_payload(AdDraft.copy_from(self.get_object())))
 
 
 STATS_DAY = {

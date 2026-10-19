@@ -779,3 +779,49 @@ class AdTableSettings(models.Model):
     def columns_for(cls, user):
         saved = cls.objects.filter(user=user).values_list('columns', flat=True).first()
         return list(saved) if saved is not None else list(DEFAULT_TABLE_COLUMNS)
+
+
+# Поля формы создания, которые «Create a similar ad» переносит в черновик (деньги, статусы, даты — нет)
+DRAFT_COPY_FIELDS = ('placement', 'title', 'text', 'url', 'show_channel_picture', 'other_info', 'cpm', 'daily_limit',
+                     'views_per_user_per_day', 'initial_status', 'schedule')
+
+
+class AdDraft(models.Model):
+    """
+    Черновик формы создания объявления — один на пользователя, как у Telegram.
+    data — содержимое формы как есть (может быть незаконченным), проверяется только при создании объявления
+    """
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='ad_draft',
+                                verbose_name='Пользователь')
+    data = models.JSONField('Данные формы', default=dict)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Черновик объявления'
+        verbose_name_plural = 'Черновики объявлений'
+
+    def __str__(self):
+        return f'Черновик {self.user}'
+
+    @staticmethod
+    def data_from_ad(ad):
+        """Объявление → данные формы создания (текущий креатив, таргетинг в формате ввода)"""
+        data = {field: getattr(ad, field) for field in DRAFT_COPY_FIELDS}
+        data['media'] = str(ad.media_id) if ad.media_id else None
+        # Каналы хранятся как {username, id}, а форма шлёт просто имена
+        targeting = {key: [item['username'] if isinstance(item, dict) else item for item in value]
+                     if isinstance(value, list) else value
+                     for key, value in ad.targeting.items()}
+        # Свой канал в исключения добавляется сам при создании. В копии ссылку часто меняют —
+        # старый канал не должен остаться в исключениях
+        if 'exclude_channels' in targeting:
+            targeting['exclude_channels'] = [name for name in targeting['exclude_channels']
+                                             if name != ad.promoted_username]
+        data['targeting'] = targeting
+        return data
+
+    @classmethod
+    def copy_from(cls, ad):
+        """Create a similar ad: черновик пользователя заменяется копией объявления"""
+        draft, _ = cls.objects.update_or_create(user=ad.user, defaults={'data': cls.data_from_ad(ad)})
+        return draft

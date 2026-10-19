@@ -199,6 +199,7 @@ REST_FRAMEWORK = {
         'user': '500/minute',  # ограничения для авторизованных пользователей
         'tg_resolve': '60/minute',  # данные канала/бота по t.me-ссылке (ходит в Telegram)
         'tg_similar': '20/minute',  # похожие каналы/боты (ходит в AdGram → ads.telegram.org)
+        'ads_draft': '60/minute',  # черновик объявления (фронт сохраняет через 3 с после изменений)
     }
 }
 

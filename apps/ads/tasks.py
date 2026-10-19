@@ -1,4 +1,5 @@
 import logging
+import uuid
 from datetime import timedelta
 
 import redis
@@ -8,7 +9,7 @@ from django.utils import timezone
 from core.celery import app
 
 from apps.ads.media import process_video
-from apps.ads.models import Ad, AdMedia
+from apps.ads.models import Ad, AdDraft, AdMedia
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +28,22 @@ def process_ad_media(media_id):
         process_video(media)
 
 
+def draft_media_ids():
+    """id медиа из черновиков (в черновике может лежать что угодно — берём только корректные UUID)"""
+    ids = []
+    for value in AdDraft.objects.exclude(data__media=None).values_list('data__media', flat=True):
+        try:
+            ids.append(uuid.UUID(str(value)))
+        except ValueError:
+            continue
+    return ids
+
+
 @app.task
 def cleanup_ad_media():
-    """Раз в сутки: медиа старше 24 ч, на которые не ссылается ни одно объявление и ни одна правка"""
+    """Раз в сутки: медиа старше 24 ч, на которые не ссылается ни одно объявление, правка или черновик"""
     orphans = AdMedia.objects.filter(created_at__lt=timezone.now() - timedelta(hours=24),
-                                     ads__isnull=True, revisions__isnull=True)
+                                     ads__isnull=True, revisions__isnull=True).exclude(pk__in=draft_media_ids())
     deleted = 0
     for media in orphans:
         file_name = media.file.name
