@@ -3,6 +3,7 @@ import uuid
 from decimal import Decimal
 
 from django.conf import settings
+from django.contrib.postgres.fields import ArrayField
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.db.models import F, Q
@@ -50,6 +51,12 @@ class InitialStatus(models.TextChoices):
     """Каким станет объявление после одобрения модератором"""
     ACTIVE = AdStatus.ACTIVE.value, AdStatus.ACTIVE.label
     ON_HOLD = AdStatus.ON_HOLD.value, AdStatus.ON_HOLD.label
+
+
+class ActionType(models.TextChoices):
+    """Действие после перехода по рекламе: подписка на канал или запуск бота"""
+    JOIN = 'JOIN', 'Подписка на канал'
+    START = 'START', 'Запуск бота'
 
 
 class AdStateError(Exception):
@@ -223,6 +230,13 @@ class Ad(models.Model):
     views_per_user_per_day = models.PositiveSmallIntegerField(
         'Показов одному человеку в сутки', default=1, help_text='0 — без ограничений, иначе 1–4')
 
+    # Итоги для списка и сортировки — увеличивает сброс показов (в той же транзакции, что и spent)
+    views_total = models.PositiveBigIntegerField('Платные показы', default=0)
+    free_views_total = models.PositiveBigIntegerField('Бесплатные показы', default=0)
+    clicks_total = models.PositiveBigIntegerField('Клики', default=0)
+    actions_total = models.PositiveBigIntegerField('Действия (подписка / запуск бота)', default=0)
+    video_opens_total = models.PositiveBigIntegerField('Открытия видео', default=0)
+
     # Статус, даты, расписание
     status = models.CharField('Статус', max_length=16, choices=AdStatus.choices,
                               default=AdStatus.IN_REVIEW, db_index=True)
@@ -272,6 +286,25 @@ class Ad(models.Model):
     @property
     def ad_format(self):
         return AD_FORMATS[self.placement]
+
+    @property
+    def promoted_username(self):
+        return self.promoted_peer.username if self.promoted_peer else self.url.rstrip('/').rsplit('/', 1)[-1]
+
+    @property
+    def promoted_type(self):
+        """CHANNEL или BOT. У объявлений до этапа 5а нет promoted_peer — по имени из ссылки"""
+        from apps.directories.models import TelegramPeer
+        peer = self.promoted_peer
+        if peer and peer.peer_type in (TelegramPeer.PeerType.CHANNEL, TelegramPeer.PeerType.BOT):
+            return peer.peer_type
+        is_bot = self.promoted_username.lower().endswith('bot')
+        return TelegramPeer.PeerType.BOT if is_bot else TelegramPeer.PeerType.CHANNEL
+
+    @property
+    def action_type(self):
+        """Какое действие считаем: подписка на канал или запуск бота (текст переводит фронт)"""
+        return ActionType.START if self.promoted_type == 'BOT' else ActionType.JOIN
 
     def remaining_budget(self):
         """Остаток бюджета: budget − spent − refunded (точно)"""
@@ -639,6 +672,9 @@ class AdDailyStat(models.Model):
     free_views = models.PositiveIntegerField('Бесплатные показы', default=0,
                                              help_text='Бюджет или дневной лимит кончились, объявление уже не активно')
     clicks = models.PositiveIntegerField('Клики', default=0)
+    actions = models.PositiveIntegerField('Действия', default=0,
+                                          help_text='Подписка на канал / запуск бота после клика')
+    video_opens = models.PositiveIntegerField('Открытия видео', default=0)
     spent = models.DecimalField('Потрачено', max_digits=19, decimal_places=6, default=Decimal('0'))
 
     class Meta:
@@ -716,3 +752,30 @@ class AdReport(models.Model):
         self.reviewed_by = moderator
         self.reviewed_at = timezone.now()
         self.save(update_fields=['status', 'reviewed_by', 'reviewed_at'])
+
+
+# Столбцы таблицы объявлений (как «Customize Table» у Telegram) и включённые по умолчанию
+TABLE_COLUMNS = ('views', 'opened_video', 'clicks', 'actions', 'ctr', 'cvr', 'cpm', 'cpc', 'cpa', 'spent',
+                 'remaining_budget', 'targeting', 'url', 'action_type', 'status', 'created_at')
+DEFAULT_TABLE_COLUMNS = ('views', 'clicks', 'actions', 'cpm', 'spent', 'remaining_budget', 'url', 'status',
+                         'created_at')
+
+
+class AdTableSettings(models.Model):
+    """Какие столбцы таблицы объявлений показывать пользователю (и в каком порядке)"""
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='ad_table_settings',
+                                verbose_name='Пользователь')
+    columns = ArrayField(models.CharField(max_length=32), verbose_name='Столбцы', default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Столбцы таблицы объявлений'
+        verbose_name_plural = 'Столбцы таблицы объявлений'
+
+    def __str__(self):
+        return f'{self.user}: {", ".join(self.columns)}'
+
+    @classmethod
+    def columns_for(cls, user):
+        saved = cls.objects.filter(user=user).values_list('columns', flat=True).first()
+        return list(saved) if saved is not None else list(DEFAULT_TABLE_COLUMNS)

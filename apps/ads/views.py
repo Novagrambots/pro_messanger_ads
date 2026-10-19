@@ -1,17 +1,24 @@
 import logging
+from datetime import date, timedelta
 
 from django.db import transaction
+from django.db.models import Case, DecimalField, F, FloatField, Prefetch, Q, Value, When
+from django.db.models.functions import Cast, Lower, NullIf
 from django.shortcuts import get_object_or_404
-from drf_spectacular.utils import extend_schema
-from rest_framework import generics, permissions, status
+from django.utils import timezone
+from drf_spectacular.utils import OpenApiParameter, extend_schema
+from rest_framework import generics, permissions, serializers, status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.ads import stats
 from apps.ads.media import MediaError, save_upload
-from apps.ads.models import Ad, AdMedia, AdPricing, AdStateError, AdStatus
+from apps.ads.models import (DEFAULT_TABLE_COLUMNS, TABLE_COLUMNS, Ad, AdMedia, AdPricing, AdRevision, AdStateError,
+                             AdStatus, AdTableSettings)
 from apps.ads.serializers import (AdBudgetTopUpSerializer, AdCreateSerializer, AdMediaSerializer, AdPricingSerializer,
-                                  AdSerializer, AdUpdateSerializer, BudgetOperationSerializer)
+                                  AdSerializer, AdTableSettingsSerializer, AdUpdateSerializer,
+                                  BudgetOperationSerializer)
 from apps.ads.serving.store import ServingUnavailable
 from apps.billing.models import MoneyOperation
 from apps.billing.services import charge, format_money
@@ -37,16 +44,69 @@ def state_error(exc):
     return Response({exc.field or 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
 
+ALL_VIEWS = F('views_total') + F('free_views_total')
+# ?ordering= : столбец таблицы → выражение (null всегда в конце). targeting не сортируется
+ORDERING = {
+    'created_at': F('created_at'),
+    'title': Lower('title'),
+    'url': F('url'),
+    'status': F('status'),
+    'cpm': F('cpm'),
+    'spent': F('spent'),
+    'remaining_budget': F('budget') - F('spent') - F('refunded'),
+    'views': ALL_VIEWS,
+    'opened_video': F('video_opens_total'),
+    'clicks': F('clicks_total'),
+    'actions': F('actions_total'),
+    'action_type': Case(When(promoted_peer__peer_type='BOT', then=Value('START')),
+                        When(promoted_peer__isnull=True, url__iendswith='bot', then=Value('START')),
+                        default=Value('JOIN')),
+    'ctr': Cast('clicks_total', FloatField()) / NullIf(ALL_VIEWS, 0),
+    'cvr': Cast('actions_total', FloatField()) / NullIf(F('clicks_total'), 0),
+    'cpc': Cast(F('spent') / NullIf(F('clicks_total'), 0), DecimalField(max_digits=30, decimal_places=6)),
+    'cpa': Cast(F('spent') / NullIf(F('actions_total'), 0), DecimalField(max_digits=30, decimal_places=6)),
+}
+ORDERING_HELP = (f'Столбец: {", ".join(ORDERING)}; «-» впереди — по убыванию. По умолчанию -created_at. '
+                 f'Пустые значения (деление на ноль) — в конце. targeting не сортируется')
+
+
 class AdListCreateView(generics.ListCreateAPIView):
-    """Список своих объявлений (новые сверху) и создание нового"""
+    """
+    Список своих объявлений и создание нового. Поиск ?q= — по названию, ссылке и username
+    продвигаемого; сортировка ?ordering= по любому столбцу таблицы (кроме targeting)
+    """
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardResultsSetPagination
     serializer_class = AdSerializer
 
+    @extend_schema(parameters=[
+        OpenApiParameter('q', str, description='Поиск по названию, ссылке или username продвигаемого'),
+        OpenApiParameter('ordering', str, description=ORDERING_HELP),
+    ])
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
     def get_queryset(self):
         if getattr(self, 'swagger_fake_view', False):
             return Ad.objects.none()
-        return own_ads(self.request.user)
+        # Канал, медиа и правки — заранее, без запросов на каждую строку
+        queryset = own_ads(self.request.user).select_related('promoted_peer', 'media').prefetch_related(
+            Prefetch('revisions', queryset=AdRevision.objects.select_related('media').order_by('-created_at'),
+                     to_attr='listed_revisions'))
+        query = self.request.query_params.get('q', '').strip()
+        if query:
+            queryset = queryset.filter(Q(title__icontains=query) | Q(url__icontains=query)
+                                       | Q(promoted_peer__username__icontains=query.lstrip('@')))
+        return self._ordered(queryset)
+
+    def _ordered(self, queryset):
+        ordering = self.request.query_params.get('ordering') or '-created_at'
+        column = ordering.removeprefix('-')
+        if column not in ORDERING:
+            raise serializers.ValidationError({'ordering': [ORDERING_HELP]})
+        value = F('sort_value')
+        sort = value.desc(nulls_last=True) if ordering.startswith('-') else value.asc(nulls_last=True)
+        return queryset.annotate(sort_value=ORDERING[column]).order_by(sort, '-created_at', 'pk')
 
     @extend_schema(request=AdCreateSerializer, responses={201: AdSerializer, **ORDER_CREATE_ERROR_RESPONSES})
     def post(self, request, *args, **kwargs):
@@ -148,6 +208,92 @@ class AdBudgetTopUpView(generics.GenericAPIView):
             # Так же: локально откатилось, списание AdGram вернёт компенсация
             return Response({'detail': SERVING_DOWN}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(AdSerializer(ad, context={'request': request}).data)
+
+
+class AdTableSettingsView(APIView):
+    """Какие столбцы таблицы объявлений показывать (как «Customize Table» у Telegram — хранится на сервере)"""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def payload(self, columns):
+        return {'columns': columns, 'available': list(TABLE_COLUMNS), 'default': list(DEFAULT_TABLE_COLUMNS)}
+
+    @extend_schema(responses={200: AdTableSettingsSerializer})
+    def get(self, request):
+        return Response(self.payload(AdTableSettings.columns_for(request.user)))
+
+    @extend_schema(request=AdTableSettingsSerializer, responses={200: AdTableSettingsSerializer})
+    def put(self, request):
+        serializer = AdTableSettingsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        columns = serializer.validated_data['columns']
+        AdTableSettings.objects.update_or_create(user=request.user, defaults={'columns': columns})
+        return Response(self.payload(columns))
+
+
+STATS_DAY = {
+    'type': 'object',
+    'properties': {
+        'date': {'type': 'string', 'format': 'date'},
+        'views': {'type': 'integer', 'description': 'Платные показы'},
+        'free_views': {'type': 'integer', 'description': 'Бесплатные (кончился бюджет / лимит, объявление не активно)'},
+        'clicks': {'type': 'integer'},
+        'actions': {'type': 'integer'},
+        'video_opens': {'type': 'integer'},
+        'spent': {'type': 'string', 'format': 'decimal'},
+    },
+}
+STATS_RESPONSE = {
+    'type': 'object',
+    'properties': {
+        'from': {'type': 'string', 'format': 'date'},
+        'to': {'type': 'string', 'format': 'date'},
+        'days': {'type': 'array', 'items': STATS_DAY, 'description': 'Каждый день периода, дни без показов — нули'},
+        'totals': {
+            'type': 'object',
+            'properties': {
+                **{key: value for key, value in STATS_DAY['properties'].items() if key != 'date'},
+                'ctr': {'type': 'number', 'nullable': True, 'description': 'clicks / (views + free_views)'},
+                'cvr': {'type': 'number', 'nullable': True, 'description': 'actions / clicks'},
+                'cpc': {'type': 'string', 'format': 'decimal', 'nullable': True},
+                'cpa': {'type': 'string', 'format': 'decimal', 'nullable': True},
+            },
+        },
+    },
+}
+MAX_STATS_PERIOD = timedelta(days=365)
+
+
+class AdStatsView(generics.GenericAPIView):
+    """
+    Статистика объявления по дням (сутки по Ташкенту) за период ?from=&to= (YYYY-MM-DD, включительно;
+    по умолчанию — последние 30 дней, не больше года). Показы последних секунд могут прийти через 5 с
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = AdSerializer
+
+    def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False):
+            return Ad.objects.none()
+        return own_ads(self.request.user)
+
+    @extend_schema(parameters=[
+        OpenApiParameter('from', str, description='Первый день, YYYY-MM-DD'),
+        OpenApiParameter('to', str, description='Последний день, YYYY-MM-DD (по умолчанию — сегодня)'),
+    ], responses={200: STATS_RESPONSE, 400: STATE_ERROR_RESPONSE})
+    def get(self, request, pk):
+        ad = self.get_object()
+        try:
+            end = date.fromisoformat(request.query_params['to']) if request.query_params.get('to') \
+                else timezone.localdate()
+            start = date.fromisoformat(request.query_params['from']) if request.query_params.get('from') \
+                else end - timedelta(days=29)
+        except ValueError:
+            return Response({'error': 'Даты — в формате YYYY-MM-DD'}, status=status.HTTP_400_BAD_REQUEST)
+        if start > end:
+            return Response({'error': 'Начало периода позже конца'}, status=status.HTTP_400_BAD_REQUEST)
+        if end - start > MAX_STATS_PERIOD:
+            return Response({'error': 'Период — не больше года'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(stats.period(ad, start, end))
 
 
 class AdBudgetHistoryView(generics.ListAPIView):

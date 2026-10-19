@@ -4,9 +4,9 @@ from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from apps.ads import validators
-from apps.ads.models import (MEDIA_PLACEMENTS, Ad, AdMedia, AdPricing, AdRevision, AdStateError, InitialStatus,
-                            Placement, default_schedule)
+from apps.ads import stats, validators
+from apps.ads.models import (MEDIA_PLACEMENTS, TABLE_COLUMNS, ActionType, Ad, AdMedia, AdPricing, AdRevision,
+                             AdStateError, InitialStatus, Placement, default_schedule)
 from apps.billing.models import MoneyOperation
 from apps.billing.services import charge, check_budget, format_money
 from apps.directories.serializers import TelegramPeerSerializer
@@ -78,13 +78,34 @@ def resolve_media(user, media_id, placement):
 ERR_MEDIA_WITH_PICTURE = 'Фото канала не показывается вместе с медиа — уберите одно из двух'
 
 
+TARGETING_SUMMARY = {
+    'type': 'object',
+    'properties': {
+        'kind': {'type': 'string', 'enum': ['queries', 'bots', 'all_bots', 'channels', 'languages', 'locations',
+                                            'countries']},
+        'count': {'type': 'integer', 'nullable': True, 'description': 'null у all_bots (показ в любых ботах)'},
+    },
+}
+
+
 class AdSerializer(serializers.ModelSerializer):
-    """Объявление глазами владельца (список и детали)"""
+    """Объявление глазами владельца (список и детали): + показы, клики, действия и метрики, как у Telegram"""
     ad_format = serializers.CharField(read_only=True, help_text='search / bot / users / channels')
     budget = MoneyField(help_text='Всего внесено в бюджет')
     spent = MoneyField()
     refunded = MoneyField()
     remaining_budget = MoneyField(help_text='Остаток: budget − spent − refunded')
+    views = serializers.SerializerMethodField(help_text='Все показы: платные + бесплатные')
+    opened_video = serializers.IntegerField(source='video_opens_total', read_only=True)
+    clicks = serializers.IntegerField(source='clicks_total', read_only=True)
+    actions = serializers.IntegerField(source='actions_total', read_only=True)
+    action_type = serializers.ChoiceField(choices=ActionType.choices, read_only=True,
+                                          help_text='JOIN — подписка на канал, START — запуск бота')
+    ctr = serializers.SerializerMethodField(help_text='clicks / views, доля (6 знаков); null — показов нет')
+    cvr = serializers.SerializerMethodField(help_text='actions / clicks, доля; null — кликов нет')
+    cpc = serializers.SerializerMethodField(help_text='spent / clicks; null — кликов нет')
+    cpa = serializers.SerializerMethodField(help_text='spent / actions; null — действий нет')
+    targeting_summary = serializers.SerializerMethodField()
     promoted_peer = TelegramPeerSerializer(read_only=True, help_text='Продвигаемый канал или бот (для превью)')
     media = AdMediaBriefSerializer(read_only=True, allow_null=True)
     pending_revision = serializers.SerializerMethodField(
@@ -98,20 +119,50 @@ class AdSerializer(serializers.ModelSerializer):
             'id', 'placement', 'ad_format', 'title', 'text', 'url', 'promoted_peer', 'show_channel_picture',
             'other_info', 'media',
             'cpm', 'budget', 'spent', 'refunded', 'remaining_budget', 'daily_limit', 'views_per_user_per_day',
-            'status', 'initial_status', 'start_date', 'end_date', 'schedule', 'targeting',
+            'status', 'initial_status', 'start_date', 'end_date', 'schedule', 'targeting', 'targeting_summary',
+            'views', 'opened_video', 'clicks', 'actions', 'action_type', 'ctr', 'cvr', 'cpc', 'cpa',
             'moderation_reason', 'pending_revision', 'last_declined_revision',
             'terms_version', 'terms_accepted_at', 'created_at', 'updated_at',
         ]
         read_only_fields = fields
 
+    def get_views(self, obj) -> int:
+        return obj.views_total + obj.free_views_total
+
+    def get_ctr(self, obj) -> float | None:
+        return stats.ratio(obj.clicks_total, self.get_views(obj))
+
+    def get_cvr(self, obj) -> float | None:
+        return stats.ratio(obj.actions_total, obj.clicks_total)
+
+    @extend_schema_field({'type': 'string', 'format': 'decimal', 'nullable': True})
+    def get_cpc(self, obj):
+        return stats.money_per(obj.spent, obj.clicks_total)
+
+    @extend_schema_field({'type': 'string', 'format': 'decimal', 'nullable': True})
+    def get_cpa(self, obj):
+        return stats.money_per(obj.spent, obj.actions_total)
+
+    @extend_schema_field(TARGETING_SUMMARY)
+    def get_targeting_summary(self, obj):
+        return stats.targeting_summary(obj)
+
     @extend_schema_field(AdRevisionSerializer(allow_null=True))
     def get_pending_revision(self, obj):
-        revision = obj.pending_revision()
+        listed = getattr(obj, 'listed_revisions', None)  # список заранее подгружает одним запросом
+        if listed is not None:
+            revision = next((item for item in listed if item.status == AdRevision.Status.PENDING), None)
+        else:
+            revision = obj.pending_revision()
         return AdRevisionSerializer(revision, context=self.context).data if revision else None
 
     @extend_schema_field(AdRevisionSerializer(allow_null=True))
     def get_last_declined_revision(self, obj):
-        revision = obj.last_declined_revision()
+        listed = getattr(obj, 'listed_revisions', None)  # новые сверху
+        if listed is not None:
+            revision = listed[0] if listed and listed[0].status == AdRevision.Status.DECLINED else None
+        else:
+            revision = obj.last_declined_revision()
         return AdRevisionSerializer(revision, context=self.context).data if revision else None
 
 
@@ -355,3 +406,13 @@ class AdPricingSerializer(serializers.Serializer):
             'min_budget': pricing.min_budget,
             'terms_version': pricing.terms_version,
         })
+
+
+class AdTableSettingsSerializer(serializers.Serializer):
+    """Столбцы таблицы объявлений: выбранные (в порядке показа), допустимые и включённые по умолчанию"""
+    columns = serializers.ListField(child=serializers.ChoiceField(choices=TABLE_COLUMNS), allow_empty=True)
+    available = serializers.ListField(child=serializers.CharField(), read_only=True)
+    default = serializers.ListField(child=serializers.CharField(), read_only=True)
+
+    def validate_columns(self, value):
+        return list(dict.fromkeys(value))  # без дублей, порядок сохраняем

@@ -36,6 +36,9 @@ RECOVER_AFTER = 60    # пачка старше минуты без FlushBatch �
 LOCK_TTL = 30         # замок сброса, с
 TIME_BUDGET = 20      # один запуск сброса — не дольше, с (остальное заберёт следующий)
 KEEP_BATCHES = timedelta(days=7)
+# Итоги на объявлении ← поля дельты
+TOTALS = {'views_total': 'v', 'free_views_total': 'fv', 'clicks_total': 'c', 'actions_total': 'a',
+          'video_opens_total': 'o'}
 PRUNE_KEY = S.PREFIX + 'prune'
 
 
@@ -93,9 +96,15 @@ def _apply_locked(batch_id, ad_ids):
         per_day, partners = _parse_delta(fields)
         # При обрезке трат (аномалия) заработок партнёра не трогаем: показы были, ошибка — платформы
         spent = _clamp_to_budget(ad, per_day)
-        if spent:
-            Ad.objects.filter(pk=ad.pk).update(spent=F('spent') + spent)
-        rows += [(ad.pk, day, d['v'], d['fv'], d['c'], Decimal(d['s']) / 1000) for day, d in per_day.items()]
+        updates = {'spent': F('spent') + spent} if spent else {}
+        for field, kind in TOTALS.items():  # итоги для списка — тем же UPDATE
+            total = sum(d[kind] for d in per_day.values())
+            if total:
+                updates[field] = F(field) + total
+        if updates:
+            Ad.objects.filter(pk=ad.pk).update(**updates)
+        rows += [(ad.pk, day, d['v'], d['fv'], d['c'], d['a'], d['o'], Decimal(d['s']) / 1000)
+                 for day, d in per_day.items()]
         partner_rows += [(ad.pk, channel_id, *earned) for channel_id, earned in partners.items()]
     _upsert_stats(rows)
     _accrue_partners(partner_rows)
@@ -106,7 +115,7 @@ def _apply_locked(batch_id, ad_ids):
 def _parse_delta(fields):
     """
     {'20261017:v': '3', 'p:-100…': '1500000', 'pv:-100…': '3', ...} →
-    ({date: {'v': 3, 'fv': 0, 'c': 0, 's': 3000}}, {channel_id: [миллионные сума, оплаченные показы]})
+    ({date: {'v': 3, 'fv': 0, 'c': 0, 'a': 0, 'o': 0, 's': 3000}}, {channel_id: [миллионные сума, показы]})
     """
     per_day, partners = {}, {}
     for field, value in fields.items():
@@ -114,7 +123,8 @@ def _parse_delta(fields):
         if prefix in ('p', 'pv'):
             partners.setdefault(int(rest), [0, 0])[0 if prefix == 'p' else 1] += int(value)
             continue
-        counters = per_day.setdefault(datetime.strptime(prefix, '%Y%m%d').date(), {'v': 0, 'fv': 0, 'c': 0, 's': 0})
+        counters = per_day.setdefault(datetime.strptime(prefix, '%Y%m%d').date(),
+                                      {'v': 0, 'fv': 0, 'c': 0, 'a': 0, 'o': 0, 's': 0})
         counters[rest] += int(value)
     return per_day, partners
 
@@ -155,11 +165,12 @@ def _upsert_stats(rows):
     if not rows:
         return
     table = connection.ops.quote_name(AdDailyStat._meta.db_table)
-    values = ', '.join(['(%s, %s, %s, %s, %s, %s)'] * len(rows))
-    sql = (f'INSERT INTO {table} (ad_id, date, views, free_views, clicks, spent) VALUES {values} '
-           f'ON CONFLICT (ad_id, date) DO UPDATE SET '
+    values = ', '.join(['(%s, %s, %s, %s, %s, %s, %s, %s)'] * len(rows))
+    sql = (f'INSERT INTO {table} (ad_id, date, views, free_views, clicks, actions, video_opens, spent) '
+           f'VALUES {values} ON CONFLICT (ad_id, date) DO UPDATE SET '
            f'views = {table}.views + EXCLUDED.views, free_views = {table}.free_views + EXCLUDED.free_views, '
-           f'clicks = {table}.clicks + EXCLUDED.clicks, spent = {table}.spent + EXCLUDED.spent')
+           f'clicks = {table}.clicks + EXCLUDED.clicks, actions = {table}.actions + EXCLUDED.actions, '
+           f'video_opens = {table}.video_opens + EXCLUDED.video_opens, spent = {table}.spent + EXCLUDED.spent')
     with connection.cursor() as cursor:
         cursor.execute(sql, [value for row in rows for value in row])
 

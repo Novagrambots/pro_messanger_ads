@@ -6,6 +6,9 @@ visible_ratio можно присылать — сервер их не пров�
 зрителю сегодня показали лимит → отказ; иначе списание цены (если есть остаток и дневной лимит
 позволяет) или бесплатный показ. Объявление уже не ACTIVE (нет в снимке) — показ бесплатный.
 click — бесплатно; повтор того же зрителя по тому же объявлению за 5 с не считается.
+action (подписка на канал / запуск бота после перехода) — один раз на токен и только после
+засчитанного клика по нему; video_open (открыл видео объявления) — один раз на токен, только
+у объявления с видео. Оба бесплатно.
 Оплаченное сообщение в подтверждённом канале партнёрки — ещё и доля партнёру (в том же Lua,
 в миллионных сума).
 """
@@ -46,8 +49,20 @@ def _prepare(store, event, viewer, snapshot, day, now):
         return store.view, keys, [ttl, ad_id, *limits, day, S.FREQ_TTL, S.DAILY_TTL, *partner]
 
     if event.get('type') == 'click':
-        keys = [S.event_key(token.nonce, 'c'), S.click_key(ad_id, viewer), S.delta_key(ad_id), S.DIRTY]
+        keys = [S.event_key(token.nonce, 'c'), S.click_key(ad_id, viewer), S.delta_key(ad_id), S.DIRTY,
+                S.event_key(token.nonce, 'k')]
         return store.click, keys, [ttl, S.CLICK_WINDOW, day, ad_id]
+
+    if event.get('type') == 'action':
+        keys = [S.event_key(token.nonce, 'a'), S.event_key(token.nonce, 'k'), S.delta_key(ad_id), S.DIRTY]
+        return store.once, keys, [ttl, f'{day}:a', ad_id, '1']
+
+    if event.get('type') == 'video_open':
+        entry = snapshot.ads.get(ad_id)
+        if entry is not None and (entry.payload['media'] or {}).get('type') != 'VIDEO':
+            return None  # у объявления нет видео
+        keys = [S.event_key(token.nonce, 'o'), S.event_key(token.nonce, 'k'), S.delta_key(ad_id), S.DIRTY]
+        return store.once, keys, [ttl, f'{day}:o', ad_id, '0']
     return None
 
 

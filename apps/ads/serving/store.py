@@ -52,7 +52,7 @@ def history_key(viewer):
 
 
 def event_key(nonce, kind):
-    """Отметка «событие по этому токену уже учтено» (kind: v / c)"""
+    """Отметка по токену (kind): v / c / a / o — «событие уже пришло», k — «клик засчитан»"""
     return f'{PREFIX}e:{nonce}:{kind}'
 
 
@@ -62,7 +62,8 @@ def click_key(ad_id, viewer):
 
 def delta_key(ad_id):
     """
-    Несброшенные дельты: поля «<день>:v|fv|c|s» (показы, бесплатные показы, клики, потрачено в тысячных)
+    Несброшенные дельты: поля «<день>:v|fv|c|a|o|s» (показы, бесплатные показы, клики, действия,
+    открытия видео, потрачено в тысячных)
     и «p:<канал>» / «pv:<канал>» (заработок партнёра в миллионных сума / оплаченные показы в канале)
     """
     return f'{PREFIX}delta:{ad_id}'
@@ -145,12 +146,24 @@ redis.call('SADD', KEYS[6], ARGV[2])
 return 2
 """
 
-# Событие click. Ответ: 1 — засчитан, 0 — дубль токена, -1 — повтор того же зрителя за 5 с
+# Событие click. Ответ: 1 — засчитан, 0 — дубль токена, -1 — повтор того же зрителя за 5 с.
+# KEYS[5] — отметка «клик по токену засчитан» (по ней action проверяет, что переход был)
 CLICK_LUA = """
 if not redis.call('SET', KEYS[1], 1, 'NX', 'EX', ARGV[1]) then return 0 end
 if not redis.call('SET', KEYS[2], 1, 'NX', 'EX', ARGV[2]) then return -1 end
 redis.call('HINCRBY', KEYS[3], ARGV[3] .. ':c', 1)
 redis.call('SADD', KEYS[4], ARGV[4])
+redis.call('SET', KEYS[5], 1, 'EX', ARGV[1])
+return 1
+"""
+
+# Событие action / video_open — один раз на токен, бесплатно. ARGV[4] = '1' — нужен засчитанный клик
+# по этому же токену (KEYS[2] — отметка «клик засчитан»). Ответ: 1 — засчитано, 0 — дубль, -1 — клика не было
+ONCE_LUA = """
+if ARGV[4] == '1' and redis.call('EXISTS', KEYS[2]) == 0 then return -1 end
+if not redis.call('SET', KEYS[1], 1, 'NX', 'EX', ARGV[1]) then return 0 end
+redis.call('HINCRBY', KEYS[3], ARGV[2], 1)
+redis.call('SADD', KEYS[4], ARGV[3])
 return 1
 """
 
@@ -241,6 +254,7 @@ class _Store:
             url, decode_responses=True, socket_connect_timeout=1, socket_timeout=2, health_check_interval=30)
         self.view = self.redis.register_script(VIEW_LUA)
         self.click = self.redis.register_script(CLICK_LUA)
+        self.once = self.redis.register_script(ONCE_LUA)
         self.grab = self.redis.register_script(GRAB_LUA)
         self.settle = self.redis.register_script(SETTLE_LUA)
         self.restore = self.redis.register_script(RESTORE_LUA)

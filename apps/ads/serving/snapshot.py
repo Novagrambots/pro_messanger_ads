@@ -105,11 +105,7 @@ def allowed_now(rule, now):
 def _promoted(ad):
     """Что продвигаем. У объявлений до этапа 5а нет promoted_peer — берём имя из ссылки"""
     peer = ad.promoted_peer
-    username = peer.username if peer else ad.url.rstrip('/').rsplit('/', 1)[-1]
-    if peer and peer.peer_type in (TelegramPeer.PeerType.CHANNEL, TelegramPeer.PeerType.BOT):
-        peer_type = peer.peer_type
-    else:
-        peer_type = TelegramPeer.PeerType.BOT if username.lower().endswith('bot') else TelegramPeer.PeerType.CHANNEL
+    username, peer_type = ad.promoted_username, ad.promoted_type
     # В поиске карточка всегда с аватаром; в остальных местах — если выбрано «фото канала»
     show_avatar = ad.placement == Placement.SEARCH or ad.show_channel_picture
     return {

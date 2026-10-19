@@ -98,7 +98,10 @@ EVENTS_REQUEST = {
                 'required': ['random_id', 'type'],
                 'properties': {
                     'random_id': {'type': 'string'},
-                    'type': {'type': 'string', 'enum': ['view', 'click']},
+                    'type': {'type': 'string', 'enum': ['view', 'click', 'action', 'video_open'],
+                             'description': 'action — подписался на канал / запустил бота после клика '
+                                            '(только после click по этому random_id); video_open — открыл '
+                                            'видео объявления'},
                     'duration_ms': {'type': 'integer', 'description': 'Необязательно, сервер не проверяет'},
                     'visible_ratio': {'type': 'number', 'description': 'Необязательно, сервер не проверяет'},
                 },
