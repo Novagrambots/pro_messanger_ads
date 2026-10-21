@@ -48,6 +48,11 @@ class CustomUser(AbstractUser):
         """Может ли пользователь модерировать рекламу (модератор или суперадмин)"""
         return self.is_superuser or self.role == self.Role.MODERATOR
 
+    def set_role(self, role):
+        """Назначить роль (ADVERTISER / MODERATOR). Суперадмина так не дать: ADMIN — из токена AdGram"""
+        self.role = role
+        self.save(update_fields=['role'])
+
     @property
     def api_role(self):
         """Роль для ответов API: суперадмин отдаётся как ADMIN, чтобы фронт его узнал"""

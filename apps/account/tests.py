@@ -300,7 +300,7 @@ class AdGramAuthTests(TestCase):
             create_user_with_balance(**kwargs)  # параллельный запрос успел создать первым
             raise IntegrityError('duplicate key value violates unique constraint')
 
-        with patch('apps.account.authentication.create_user_with_balance', side_effect=parallel_create):
+        with patch('apps.account.services.create_user_with_balance', side_effect=parallel_create):
             response = adgram_client(make_adgram_token()).get('/api/auth/profile/')
 
         self.assertEqual(response.status_code, 200)
@@ -351,6 +351,123 @@ class AdGramAuthTests(TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertIn('Bearer', response['WWW-Authenticate'])
 
+
+
+@override_settings(ADGRAM_JWT_SECRET=ADGRAM_SECRET)
+class AdGramUserRolesTests(TestCase):
+    """Модераторы назначаются с сайта AdGram: API суперадмина по adgram_user_id"""
+    PERSON = 'clxperson0002'
+
+    def setUp(self):
+        self.admin = adgram_client(make_adgram_token(user_id='clxadmin0001', role='ADMIN'))
+
+    def put_role(self, role, adgram_user_id=PERSON, client=None):
+        return (client or self.admin).put(f'/api/auth/adgram-users/{adgram_user_id}/role/', {'role': role},
+                                          format='json')
+
+    def get_role(self, adgram_user_id=PERSON, client=None):
+        return (client or self.admin).get(f'/api/auth/adgram-users/{adgram_user_id}/')
+
+    def test_unknown_person_is_advertiser_without_shadow(self):
+        response = self.get_role()
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data, {'adgram_user_id': self.PERSON, 'adgram_username': '',
+                                         'role': 'ADVERTISER', 'user_id': None})
+        self.assertFalse(User.objects.filter(adgram_user_id=self.PERSON).exists())  # тень не создана
+
+    def test_assign_creates_shadow_and_login_picks_it_up(self):
+        response = self.put_role('MODERATOR')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['role'], 'MODERATOR')
+
+        shadow = User.objects.get(adgram_user_id=self.PERSON)
+        self.assertEqual(shadow.username, f'ag_{self.PERSON}')
+        self.assertEqual(shadow.adgram_username, '')  # заполнится при первом входе
+        self.assertFalse(shadow.has_usable_password())
+        self.assertFalse(shadow.is_superuser)
+        self.assertTrue(Balance.objects.filter(user=shadow).exists())
+        self.assertEqual(response.data['user_id'], str(shadow.user_id))
+        self.assertEqual(self.get_role().data['role'], 'MODERATOR')
+
+        # Человек впервые входит через AdGram — тот же пользователь, уже модератор, имя подтянулось
+        person = adgram_client(make_adgram_token(user_id=self.PERSON, username='Ali'))
+        profile = person.get('/api/auth/profile/')
+        self.assertEqual(profile.data['role'], 'MODERATOR')  # по профилю AdGram показывает «Moderatsiya»
+        self.assertEqual(profile.data['user_id'], str(shadow.user_id))
+        self.assertEqual(User.objects.filter(adgram_user_id=self.PERSON).count(), 1)
+        self.assertEqual(User.objects.get(adgram_user_id=self.PERSON).adgram_username, 'Ali')
+        self.assertEqual(person.get('/api/moderation/pending_count/').status_code, 200)
+
+    def test_revoke_moderator(self):
+        self.put_role('MODERATOR')
+        person = adgram_client(make_adgram_token(user_id=self.PERSON))
+        self.assertEqual(person.get('/api/moderation/pending_count/').status_code, 200)
+
+        response = self.put_role('ADVERTISER')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['role'], 'ADVERTISER')
+        self.assertEqual(person.get('/api/auth/profile/').data['role'], 'ADVERTISER')
+        self.assertEqual(person.get('/api/moderation/pending_count/').status_code, 403)
+
+    def test_list_by_role(self):
+        self.put_role('MODERATOR')
+        self.put_role('MODERATOR', adgram_user_id='clxperson0003')
+        adgram_client(make_adgram_token(user_id='clxplain0004')).get('/api/auth/profile/')  # просто рекламодатель
+        User.objects.create_user('local_moder', password='pass12345', role=User.Role.MODERATOR)  # не из AdGram
+
+        response = self.admin.get('/api/auth/adgram-users/?role=MODERATOR')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['count'], 2)
+        self.assertEqual({item['adgram_user_id'] for item in response.data['results']},
+                         {self.PERSON, 'clxperson0003'})
+        self.assertEqual(set(response.data['results'][0]), {'adgram_user_id', 'adgram_username', 'role', 'user_id'})
+
+        everyone = self.admin.get('/api/auth/adgram-users/?page_size=100').data
+        self.assertEqual(everyone['count'], 4)  # + clxplain0004 и сам админ (только юзеры AdGram)
+        self.assertEqual(self.admin.get('/api/auth/adgram-users/?role=ADMIN').status_code, 400)
+
+    def test_advertiser_and_moderator_forbidden(self):
+        advertiser = adgram_client(make_adgram_token(user_id='clxplain0004'))
+        self.put_role('MODERATOR', adgram_user_id='clxmoder0005')
+        moderator = adgram_client(make_adgram_token(user_id='clxmoder0005'))
+        for client in (advertiser, moderator):
+            self.assertEqual(client.get('/api/auth/adgram-users/').status_code, 403)
+            self.assertEqual(self.get_role(client=client).status_code, 403)
+            self.assertEqual(self.put_role('MODERATOR', client=client).status_code, 403)
+        self.assertFalse(User.objects.filter(adgram_user_id=self.PERSON).exists())
+
+    def test_django_superuser_can_too(self):
+        boss = User.objects.create_superuser('boss', password='Str0ngPass!23')
+        client = APIClient()
+        client.force_authenticate(boss)
+        self.assertEqual(self.put_role('MODERATOR', client=client).status_code, 200)
+
+    def test_bad_adgram_user_id_400(self):
+        for bad in ('bad id', 'x' * 65, 'имя', 'a.b'):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.put_role('MODERATOR', adgram_user_id=bad).status_code, 400)
+                self.assertEqual(self.get_role(adgram_user_id=bad).status_code, 400)
+        self.assertEqual(User.objects.count(), 1)  # только сам админ
+
+    def test_admin_role_or_garbage_400(self):
+        for role in ('ADMIN', 'moderator', '', None):
+            with self.subTest(role=role):
+                response = self.put_role(role)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('role', response.data)
+        self.assertFalse(User.objects.filter(adgram_user_id=self.PERSON).exists())
+
+    def test_admin_from_token_keeps_moderator_role_separately(self):
+        """ADMIN AdGram с назначенным MODERATOR: здесь видна роль new_dvs, в профиле — ADMIN"""
+        self.put_role('MODERATOR', adgram_user_id='clxadmin0001')
+        self.assertEqual(self.get_role(adgram_user_id='clxadmin0001').data['role'], 'MODERATOR')
+        self.assertEqual(self.admin.get('/api/auth/profile/').data['role'], 'ADMIN')
+
+    def test_taken_username_409(self):
+        User.objects.create_user(f'ag_{self.PERSON}', password='pass12345')  # старый юзер с таким именем
+        response = self.put_role('MODERATOR')
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(User.objects.filter(adgram_user_id=self.PERSON).exists())
 
 class AdGramSecretCheckTests(TestCase):
     """Секрет AdGram, совпавший с SECRET_KEY, роняет старт приложения"""

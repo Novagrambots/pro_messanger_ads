@@ -4,8 +4,7 @@ from drf_spectacular.utils import extend_schema_field
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 
-from apps.account.authentication import ADGRAM_USERNAME_PREFIX
-from apps.account.services import create_user_with_balance
+from apps.account.services import ADGRAM_USERNAME_PREFIX, create_user_with_balance
 
 
 User = get_user_model()
@@ -86,3 +85,16 @@ class AdminUserSerializer(serializers.ModelSerializer):
 class UserRoleUpdateSerializer(serializers.Serializer):
     """Сериализатор для смены роли пользователя суперадмином"""
     role = serializers.ChoiceField(choices=User.Role.choices)
+
+
+class AdGramUserRoleSerializer(serializers.ModelSerializer):
+    """
+    Юзер AdGram и его роль в new_dvs (ADVERTISER / MODERATOR — то, что назначает админ AdGram).
+    ADMIN тут не бывает: админство приходит из токена AdGram. user_id — null, пока тени нет
+    """
+    user_id = serializers.UUIDField(read_only=True, allow_null=True)
+
+    class Meta:
+        model = User
+        fields = ['adgram_user_id', 'adgram_username', 'role', 'user_id']
+        read_only_fields = fields

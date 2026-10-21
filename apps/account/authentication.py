@@ -1,23 +1,16 @@
-import re
-
 import jwt
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ImproperlyConfigured
-from django.db import IntegrityError
 from drf_spectacular.contrib.rest_framework_simplejwt import SimpleJWTScheme
 from drf_spectacular.extensions import OpenApiAuthenticationExtension
 from rest_framework import authentication, exceptions
 
-from apps.account.services import create_user_with_balance
+from apps.account.services import ADGRAM_USER_ID_RE, AdGramUsernameTaken, get_or_create_adgram_user
 
 
 User = get_user_model()
 
-# Юзеры AdGram получают username = "ag_" + userId. Регистрация такие имена не пускает
-ADGRAM_USERNAME_PREFIX = 'ag_'
-# userId у AdGram — cuid (латиница и цифры). Берём с запасом, но без мусора в username
-ADGRAM_USER_ID_RE = re.compile(r'[A-Za-z0-9_-]{1,64}')
 # Короткий токен AdGram для NovaGram (GET /api/novagram/token, 15 минут) — только с этим aud.
 # Основной 7-дневный токен AdGram (без aud) сюда не пускаем
 ADGRAM_AUDIENCE = 'novagram'
@@ -110,9 +103,10 @@ class AdGramJWTAuthentication(authentication.BaseAuthentication):
         if not isinstance(adgram_user_id, str) or not ADGRAM_USER_ID_RE.fullmatch(adgram_user_id):
             raise exceptions.AuthenticationFailed('В токене AdGram нет корректного userId')
 
-        user = User.objects.filter(adgram_user_id=adgram_user_id).first()
-        if user is None:
-            user = self._create_user(adgram_user_id, adgram_username)
+        try:
+            user = get_or_create_adgram_user(adgram_user_id, adgram_username or '')
+        except AdGramUsernameTaken:
+            raise exceptions.AuthenticationFailed('Не удалось создать пользователя AdGram: имя уже занято')
 
         # Имя и админство из AdGram — обновляем одним UPDATE и только когда что-то реально изменилось
         changes = {}
@@ -128,22 +122,6 @@ class AdGramJWTAuthentication(authentication.BaseAuthentication):
         if not user.is_active:
             raise exceptions.AuthenticationFailed('Пользователь отключён')
         return user
-
-    def _create_user(self, adgram_user_id, adgram_username):
-        """Первый вход юзера AdGram: создаём рекламодателя с балансом (как при регистрации)"""
-        try:
-            return create_user_with_balance(
-                username=ADGRAM_USERNAME_PREFIX + adgram_user_id,
-                adgram_user_id=adgram_user_id,
-                adgram_username=adgram_username or '',
-            )
-        except IntegrityError:
-            # Два первых запроса пришли одновременно: второй упал на unique — берём того, кого создал первый
-            user = User.objects.filter(adgram_user_id=adgram_user_id).first()
-            if user is None:
-                # unique сработал не на adgram_user_id, а на username — имя уже кем-то занято
-                raise exceptions.AuthenticationFailed('Не удалось создать пользователя AdGram: имя уже занято')
-            return user
 
 
 class BearerJWTScheme(SimpleJWTScheme):
