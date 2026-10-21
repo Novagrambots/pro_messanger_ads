@@ -78,6 +78,22 @@ def normalize_username(value):
     return name.lower()
 
 
+def not_bots(usernames):
+    """
+    Какие из имён (уже нормализованных) точно не боты. Тип, который уже определил резолвер, важнее имени:
+    у @BotFather оно не кончается на «bot». Данных резолвера нет — правило Telegram про суффикс «bot»
+    """
+    known = dict(TelegramPeer.objects.filter(username__in=usernames).exclude(peer_type=PeerType.UNKNOWN)
+                 .values_list('username', 'peer_type'))
+    return [name for name in usernames
+            if known.get(name, PeerType.BOT if name.endswith('bot') else None) != PeerType.BOT]
+
+
+def not_bot_error(username):
+    hint = '' if username.endswith('bot') else ': имя бота кончается на «bot»'
+    return f'@{username} — не бот{hint}'
+
+
 # ========================================= Резолвинг =========================================
 
 def resolve(username, deadline=None):

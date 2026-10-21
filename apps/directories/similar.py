@@ -22,7 +22,7 @@ from apps.billing import adgram_client
 from apps.billing.adgram_client import AdGramNotConfigured, AdGramRejected, AdGramUnavailable
 from apps.directories.models import TelegramPeer
 from apps.directories.telegram import (Deadline, DeadlineExceeded, download_cdn_avatar, normalize_username,
-                                       store_avatar)
+                                       not_bot_error, not_bots, store_avatar)
 
 logger = logging.getLogger(__name__)
 
@@ -138,10 +138,11 @@ def parse_usernames(raw, kind):
             name = normalize_username(part)
         except ValueError:
             raise ValueError(f'Некорректное имя: {part.strip()}') from None
-        if kind == 'bots' and not name.endswith('bot'):
-            raise ValueError(f'@{name} — не бот: имя бота кончается на «bot»')
         if name not in names:
             names.append(name)
     if not 1 <= len(names) <= config['max_inputs']:
         raise ValueError(f'Нужно от 1 до {config["max_inputs"]} имён через запятую')
+    wrong = not_bots(names) if kind == 'bots' else []
+    if wrong:
+        raise ValueError(not_bot_error(wrong[0]))
     return names

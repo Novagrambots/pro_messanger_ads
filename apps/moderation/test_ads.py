@@ -10,10 +10,12 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError, connection, transaction
 from django.test import TestCase, TransactionTestCase
 
-from apps.ads.models import Ad, AdDecision, AdRevision, AdStateError, AdStatus, Placement
-from apps.ads.tests import client_for, create_ad, make_local_user, setUpModule, tearDownModule  # noqa: F401
+from apps.ads.models import Ad, AdDecision, AdReport, AdRevision, AdStateError, AdStatus, Placement
+from apps.ads.tests import (SPORTS, client_for, create_ad, make_local_user, setUpModule,  # noqa: F401
+                            tearDownModule)
 from apps.billing.models import Balance, MoneyOperation as Op
 from apps.notifications.models import Notification
+from apps.partner.models import ChannelEarning
 
 User = get_user_model()
 Rev = AdRevision.Status
@@ -371,3 +373,77 @@ class RevisionRaceTests(TransactionTestCase):
         else:
             # Новая правка успела первой: правка 1 заменена, одобрять уже нечего, объявление прежнее
             self.assertEqual((first.status, ad.text), (Rev.SUPERSEDED, 'Свежие новости Узбекистана'))
+
+
+class DisplayNameTests(ModerationBase):
+    """Фронту — имя из AdGram вместо ag_<id>: display_name / *_name рядом со старыми полями"""
+
+    def setUp(self):
+        super().setUp()
+        # Имя в AdGram ставим напрямую: кошелёк у владельца остаётся локальным
+        for user, name in ((self.owner, 'Ali Valiyev'), (self.moderator, 'Moder AG')):
+            user.adgram_username = name
+            user.save(update_fields=['adgram_username'])
+        self.boss_client = client_for(self.boss)
+
+    def test_ad_owner_and_decision_moderator(self):
+        ad = self.approved_ad()
+        data = self.mod_client.get(f'/api/moderation/ads/{ad.pk}/').data
+        self.assertEqual((data['owner']['username'], data['owner']['display_name']), ('owner', 'Ali Valiyev'))
+        decision = data['decisions'][0]
+        self.assertEqual((decision['action'], decision['moderator'], decision['moderator_name']),
+                         (AdDecision.Action.APPROVED, 'moder', 'Moder AG'))
+        pending = self.mod_client.get('/api/moderation/ads/all/').data['results'][0]
+        self.assertEqual(pending['owner']['display_name'], 'Ali Valiyev')
+
+    def test_reports_status_filter_and_reviewer_name(self):
+        ad = self.approved_ad()
+        spam = AdReport.objects.create(ad=ad, viewer_key='1' * 32, reason=AdReport.Reason.SPAM)
+        AdReport.objects.create(ad=ad, viewer_key='2' * 32, reason=AdReport.Reason.OTHER)
+        self.assertEqual(self.mod(f'ads/reports/{spam.pk}/review/').status_code, 200)
+
+        def reports(query=''):
+            groups = self.mod_client.get(f'/api/moderation/ads/reports/{query}').data['results']
+            return sorted((report['reason'], report['status'], report['reviewed_by'], report['reviewed_by_name'])
+                          for group in groups for report in group['reports'])
+
+        self.assertEqual(reports('?status=NEW'), [('other', 'NEW', None, None)])
+        self.assertEqual(reports('?status=REVIEWED'), [('spam', 'REVIEWED', 'moder', 'Moder AG')])
+        self.assertEqual(len(reports()), 2)  # без параметра — все, как раньше
+        self.assertEqual(len(reports('?status=WRONG')), 2)  # неизвестный статус не фильтрует
+
+    def test_channels_owner_and_editor_names(self):
+        ChannelEarning.objects.create(channel_id=-1001000000009, channel_name='Kanal', owner=self.owner,
+                                      claim_status=ChannelEarning.ClaimStatus.CONFIRMED)
+        ChannelEarning.objects.create(channel_id=-1001000000010, channel_name='Ничей')
+        response = self.mod_client.patch('/api/moderation/channels/-1001000000009/',
+                                         {'language': 'uz', 'topics': [SPORTS]}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual((response.data['meta_updated_by'], response.data['meta_updated_by_name']),
+                         ('moder', 'Moder AG'))
+
+        results = self.mod_client.get('/api/moderation/channels/').data['results']
+        channels = {item['channel_id']: item for item in results}
+        self.assertEqual((channels[-1001000000009]['owner'], channels[-1001000000009]['owner_name']),
+                         ('owner', 'Ali Valiyev'))
+        self.assertIsNone(channels[-1001000000010]['owner_name'])
+
+        earnings = self.boss_client.get('/api/partner/admin/earnings/').data['results']
+        self.assertEqual({item['channel_id']: item['owner_name'] for item in earnings},
+                         {-1001000000009: 'Ali Valiyev', -1001000000010: None})
+
+    def test_profile_balance_users_and_banners(self):
+        profile = self.owner_client.get('/api/auth/profile/').data
+        self.assertEqual((profile['username'], profile['display_name']), ('owner', 'Ali Valiyev'))
+        # Без имени в AdGram — обычный username
+        self.assertEqual(self.boss_client.get('/api/auth/profile/').data['display_name'], 'boss')
+        self.assertEqual(self.owner_client.get('/api/balance/').data['display_name'], 'Ali Valiyev')
+
+        users = {item['username']: item['display_name']
+                 for item in self.boss_client.get('/api/auth/users/?page_size=100').data['results']}
+        self.assertEqual(users, {'boss': 'boss', 'moder': 'Moder AG', 'owner': 'Ali Valiyev'})
+
+        response = self.boss_client.post('/api/banner_ads/manage/', {'title': 'Баннер', 'text': 'Текст'},
+                                          format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual((response.data['created_by'], response.data['created_by_name']), ('boss', 'boss'))

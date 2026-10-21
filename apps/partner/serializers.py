@@ -50,6 +50,7 @@ class MyEarningSerializer(serializers.ModelSerializer):
 class AdminEarningSerializer(serializers.ModelSerializer):
     """Заработок канала глазами суперадмина (админ-панель)"""
     owner = serializers.SerializerMethodField()
+    owner_name = serializers.CharField(source='owner.display_name', default=None, read_only=True)
     share_rate = serializers.SerializerMethodField()
     available = MoneyField()
     total_earned = MoneyField()
@@ -57,7 +58,7 @@ class AdminEarningSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChannelEarning
         fields = [
-            'channel_id', 'channel_name', 'owner', 'claim_status', 'claimed_at',
+            'channel_id', 'channel_name', 'owner', 'owner_name', 'claim_status', 'claimed_at',
             'available', 'total_earned', 'total_impressions', 'share_rate', 'created_at',
         ]
 
@@ -125,13 +126,15 @@ class ChannelMetaSerializer(serializers.Serializer):
 class ModerationChannelSerializer(serializers.ModelSerializer):
     """Канал партнёрки глазами модератора: язык, темы и кто их менял"""
     owner = serializers.CharField(source='owner.username', default=None, read_only=True)
+    owner_name = serializers.CharField(source='owner.display_name', default=None, read_only=True)
     language = serializers.CharField(source='language_id', allow_null=True, read_only=True)
     meta_updated_by = serializers.CharField(source='meta_updated_by.username', default=None, read_only=True)
+    meta_updated_by_name = serializers.CharField(source='meta_updated_by.display_name', default=None, read_only=True)
 
     class Meta:
         model = ChannelEarning
-        fields = ['channel_id', 'channel_name', 'owner', 'claim_status', 'language', 'topics',
-                  'meta_updated_by', 'meta_updated_role', 'meta_updated_at']
+        fields = ['channel_id', 'channel_name', 'owner', 'owner_name', 'claim_status', 'language', 'topics',
+                  'meta_updated_by', 'meta_updated_by_name', 'meta_updated_role', 'meta_updated_at']
         read_only_fields = fields
 
 

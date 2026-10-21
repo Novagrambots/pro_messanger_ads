@@ -74,12 +74,14 @@ def _parse(request):
 
 
 def _bot_username(value):
-    """Имя бота из контекста: @, t.me-ссылка и регистр не важны. Не имя бота → None"""
+    """
+    Имя бота из контекста: @, t.me-ссылка и регистр не важны. Некорректное имя → None.
+    Суффикс «bot» не требуем: у @BotFather его нет, а тип бота проверили при создании объявления
+    """
     try:
-        name = normalize_username(value)
+        return normalize_username(value)
     except ValueError:
         return None
-    return name if name.endswith('bot') else None
 
 
 def _channel_id(value):
@@ -160,7 +162,7 @@ def serve(request):
     elif slot == Slot.BOT:
         key = _bot_username(context.get('bot_username'))
         if key is None:
-            return _error('context.bot_username — имя бота в Telegram (оканчивается на «bot»)', 400)
+            return _error('context.bot_username — имя бота в Telegram', 400)
     else:
         key = _channel_id(context.get('channel_id'))
         if key is None:

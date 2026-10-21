@@ -18,13 +18,14 @@ class AnnouncementManageSerializer(serializers.ModelSerializer):
     """Баннер глазами суперадмина: все поля + статистика"""
     dismissals_count = serializers.SerializerMethodField()
     created_by = serializers.SerializerMethodField()
+    created_by_name = serializers.CharField(source='created_by.display_name', default=None, read_only=True)
 
     class Meta:
         model = Announcement
         fields = ['id', 'title', 'text', 'link', 'dismissible', 'is_active',
                   'starts_at', 'ends_at', 'priority', 'clicks', 'dismissals_count',
-                  'created_by', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'clicks', 'dismissals_count', 'created_by',
+                  'created_by', 'created_by_name', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'clicks', 'dismissals_count', 'created_by', 'created_by_name',
                             'created_at', 'updated_at']
 
     @extend_schema_field(serializers.IntegerField())

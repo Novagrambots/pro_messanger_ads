@@ -7,17 +7,19 @@ from apps.chat_ads.serializers import ChatAdOrderSerializer
 class ModerationSearchOrderSerializer(OrderDetailSerializer):
     """Заказ поисковой рекламы глазами модератора: как у пользователя + имя владельца"""
     username = serializers.CharField(source='user.username', read_only=True)
+    display_name = serializers.CharField(source='user.display_name', read_only=True)
 
     class Meta(OrderDetailSerializer.Meta):
-        fields = OrderDetailSerializer.Meta.fields + ['username']
+        fields = OrderDetailSerializer.Meta.fields + ['username', 'display_name']
 
 
 class ModerationChatOrderSerializer(ChatAdOrderSerializer):
     """Заказ рекламы в чатах глазами модератора: как у пользователя + имя владельца"""
     username = serializers.CharField(source='user.username', read_only=True)
+    display_name = serializers.CharField(source='user.display_name', read_only=True)
 
     class Meta(ChatAdOrderSerializer.Meta):
-        fields = ChatAdOrderSerializer.Meta.fields + ['username']
+        fields = ChatAdOrderSerializer.Meta.fields + ['username', 'display_name']
 
 
 class ModerationReasonSerializer(serializers.Serializer):

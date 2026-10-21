@@ -1054,8 +1054,16 @@ class BotPlacementTests(ServingBase):
         for form in ('weatherbot', 'WeatherBot', '@WEATHERBOT', 't.me/weatherbot', 'https://t.me/WeatherBot',
                      ' @weatherbot '):
             self.assertEqual(self.served_in(form), str(ad.pk), form)
-        for bad in ('', '   ', 'weather', '@kunuz', 'we ather bot', 'a' * 40 + 'bot', 123, None, ['weatherbot']):
+        for bad in ('', '   ', 'we ather bot', 'a' * 40 + 'bot', 123, None, ['weatherbot']):
             self.assertEqual(self.serve_bot(bad).status_code, 400, bad)
+        self.assertIsNone(self.served_in('weather'))  # имя без «bot» — не ошибка, просто тут рекламы нет
+
+    def test_bot_without_bot_suffix(self):
+        # @BotFather — бот, хоть имя и не кончается на «bot»: и выбрать его можно, и показ в нём идёт
+        ad = self.bot_ad(bots=['@BotFather'])
+        self.reload()
+        self.assertEqual(self.served_in('BotFather'), str(ad.pk))
+        self.assertIsNone(self.served_in('weatherbot'))
 
     def test_own_bot_not_advertised_in_its_chat(self):
         own = self.bot_ad(url='https://t.me/weatherbot')  # продвигает weatherbot, боты не выбраны

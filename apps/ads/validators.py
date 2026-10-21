@@ -18,7 +18,8 @@ from rest_framework import serializers
 from apps.ads.models import Placement, USERS_PLACEMENTS
 from apps.directories import services as directories
 from apps.directories.models import TelegramPeer
-from apps.directories.telegram import TelegramUnavailable, TooManyUnknown, normalize_username as tg_username
+from apps.directories.telegram import (TelegramUnavailable, TooManyUnknown, not_bot_error, not_bots,
+                                      normalize_username as tg_username)
 
 # Устройства NovaGram (пустой список = все устройства).
 # Список ещё согласуем с мобильщиками — менять только здесь
@@ -183,9 +184,9 @@ def _channels(value):
 
 def _bots(value):
     names = _usernames(value, MAX_BOTS, 'ботов')
-    for name in names:
-        if not name.endswith('bot'):
-            raise serializers.ValidationError(f'@{name} — не бот: имя бота кончается на «bot»')
+    wrong = not_bots(names)
+    if wrong:
+        raise serializers.ValidationError(not_bot_error(wrong[0]))
     return names
 
 

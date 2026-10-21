@@ -190,6 +190,21 @@ class SimilarTests(TempMediaMixin, TestCase):
                                           'monthly_users': 4321}])
         self.assertEqual(TelegramPeer.objects.get(username='rainbot').peer_type, PeerType.BOT)
 
+    def test_similar_bots_for_bot_without_bot_suffix(self):
+        # @BotFather — бот по данным резолвера: похожие работают, хоть имя и не кончается на «bot»
+        with patch('apps.billing.adgram_client.search_bot', return_value=peer('h:father', 'BotFather')) as search, \
+                patch('apps.billing.adgram_client.similar_bots',
+                      return_value=[peer('h:rain', 'RainBot', 'Rain', monthly_users=4321)]):
+            response = self.get('@BotFather', 'similar-bots', 'bots')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual([item['username'] for item in response.data], ['rainbot'])
+        self.assertEqual(search.call_args.args[0], 'botfather')
+
+        # Резолвер имени не знает — правило про суффикс, как раньше
+        response = self.get('somechannel', 'similar-bots', 'bots')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['error'], '@somechannel — не бот: имя бота кончается на «bot»')
+
     def test_throttle_20_per_minute(self):
         with self.search, self.similar, fake({'https://cdn4.telesco.pe/': FakeResponse(JPEG)}):
             codes = [self.get('daryo').status_code for _ in range(21)]

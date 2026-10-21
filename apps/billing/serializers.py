@@ -10,12 +10,13 @@ User = get_user_model()
 class BalanceSerializer(serializers.ModelSerializer):
     """Сериализатор для баланса"""
     username = serializers.CharField(source='user.username', read_only=True)
+    display_name = serializers.CharField(source='user.display_name', read_only=True)
     user_id = serializers.CharField(source='user.user_id')
 
     class Meta:
         model = Balance
-        fields = ['username', 'amount', 'user_id']
-        read_only_fields = ['user', 'username', 'user_id']
+        fields = ['username', 'display_name', 'amount', 'user_id']
+        read_only_fields = ['user', 'username', 'display_name', 'user_id']
 
 
 class AdminDepositSerializer(serializers.Serializer):

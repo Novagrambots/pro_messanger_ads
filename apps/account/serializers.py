@@ -58,10 +58,11 @@ class UserProfileSerializer(serializers.ModelSerializer):
     """Сериализатор для профиля пользователя"""
     # api_role: суперадмин видит ADMIN, остальные — свою роль как есть
     role = serializers.CharField(source='api_role', read_only=True)
+    display_name = serializers.CharField(read_only=True)
 
     class Meta:
         model = User
-        fields = ['user_id', 'username', 'email', 'first_name', 'last_name', 'date_joined', 'role',
+        fields = ['user_id', 'username', 'display_name', 'email', 'first_name', 'last_name', 'date_joined', 'role',
                   'adgram_user_id']
 
 
@@ -69,10 +70,11 @@ class AdminUserSerializer(serializers.ModelSerializer):
     """Пользователь глазами суперадмина (список для назначения ролей и пополнения)"""
     balance = serializers.SerializerMethodField()
     role = serializers.CharField(source='api_role', read_only=True)
+    display_name = serializers.CharField(read_only=True)
 
     class Meta:
         model = User
-        fields = ['user_id', 'username', 'email', 'role', 'telegram_id', 'balance', 'date_joined']
+        fields = ['user_id', 'username', 'display_name', 'email', 'role', 'telegram_id', 'balance', 'date_joined']
 
     @extend_schema_field(serializers.DecimalField(max_digits=15, decimal_places=2, allow_null=True))
     def get_balance(self, obj):

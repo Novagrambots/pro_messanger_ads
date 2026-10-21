@@ -53,6 +53,7 @@ TEST_PEERS = {
     'kunuz': (TelegramPeer.PeerType.CHANNEL, KUNUZ_ID),
     'daryo': (TelegramPeer.PeerType.CHANNEL, DARYO_ID),
     'weatherbot': (TelegramPeer.PeerType.BOT, None),
+    'botfather': (TelegramPeer.PeerType.BOT, None),  # бот без «bot» на конце имени
 }
 SPORTS = 45  # id темы «Sports» в справочнике (как у Telegram)
 
@@ -173,6 +174,24 @@ class AdCreateTests(TestCase):
         self.assertEqual(response.data['targeting'], {'bots': ['weatherbot']})
         response = create_ad(self.client, targeting={})  # пусто = любые боты
         self.assertEqual(response.data['targeting'], {'bots': []})
+
+    def test_bot_without_bot_suffix(self):
+        # Резолвер уже знает, что @BotFather — бот: верим ему, а не имени
+        response = create_ad(self.client, targeting={'bots': ['t.me/BotFather', 'weatherbot']})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['targeting'], {'bots': ['botfather', 'weatherbot']})
+
+        # Данных резолвера нет — правило про суффикс (в Telegram не ходим: сеть в этих тестах запрещена)
+        response = create_ad(self.client, targeting={'bots': ['somechannel']})
+        self.assert_invalid(response, 'targeting')
+        self.assertIn('@somechannel — не бот: имя бота кончается на «bot»', str(response.data))
+
+        # Резолвер сказал «канал» — суффикс «bot» не спасает
+        TelegramPeer.objects.create(username='newsbot', peer_type=TelegramPeer.PeerType.CHANNEL,
+                                    fetched_at=timezone.now())
+        response = create_ad(self.client, targeting={'bots': ['newsbot']})
+        self.assert_invalid(response, 'targeting')
+        self.assertIn('@newsbot — не бот', str(response.data))
 
     def test_users_targeting(self):
         for placement, targeting in (

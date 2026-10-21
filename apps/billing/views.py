@@ -27,6 +27,7 @@ class BalanceView(generics.GenericAPIView):
         # Строкой — как раньше (Decimal в JSON иначе стал бы float)
         return Response({
             'username': user.username,
+            'display_name': user.display_name,
             'amount': format_money(wallet_amount_for_display(user)),
             'user_id': str(user.user_id),
         })

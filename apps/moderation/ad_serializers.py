@@ -12,6 +12,7 @@ class AdOwnerSerializer(serializers.Serializer):
     user_id = serializers.UUIDField()
     username = serializers.CharField()
     adgram_username = serializers.CharField(help_text='Имя в AdGram (пусто, если вошёл не через AdGram)')
+    display_name = serializers.CharField(help_text='Имя для показа: adgram_username, а если пусто — username')
 
 
 class ModerationAdSerializer(AdSerializer):
@@ -25,11 +26,12 @@ class ModerationAdSerializer(AdSerializer):
 
 class AdDecisionSerializer(serializers.ModelSerializer):
     moderator = serializers.CharField(source='moderator.username', default=None, read_only=True)
+    moderator_name = serializers.CharField(source='moderator.display_name', default=None, read_only=True)
     revision_id = serializers.UUIDField(read_only=True)
 
     class Meta:
         model = AdDecision
-        fields = ['action', 'reason', 'moderator', 'revision_id', 'created_at']
+        fields = ['action', 'reason', 'moderator', 'moderator_name', 'revision_id', 'created_at']
         read_only_fields = fields
 
 
@@ -85,10 +87,11 @@ class ModerationRevisionSerializer(serializers.ModelSerializer):
 class AdReportSerializer(serializers.ModelSerializer):
     """Одна жалоба зрителя (кто пожаловался — не показываем)"""
     reviewed_by = serializers.CharField(source='reviewed_by.username', default=None, read_only=True)
+    reviewed_by_name = serializers.CharField(source='reviewed_by.display_name', default=None, read_only=True)
 
     class Meta:
         model = AdReport
-        fields = ['id', 'reason', 'details', 'status', 'created_at', 'reviewed_by', 'reviewed_at']
+        fields = ['id', 'reason', 'details', 'status', 'created_at', 'reviewed_by', 'reviewed_by_name', 'reviewed_at']
         read_only_fields = fields
 
 

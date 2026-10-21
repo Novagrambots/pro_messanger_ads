@@ -54,6 +54,11 @@ class CustomUser(AbstractUser):
         self.save(update_fields=['role'])
 
     @property
+    def display_name(self):
+        """Имя для показа на фронте: у юзера AdGram — его имя в AdGram, а не ag_<id>"""
+        return self.adgram_username or self.username
+
+    @property
     def api_role(self):
         """Роль для ответов API: суперадмин отдаётся как ADMIN, чтобы фронт его узнал"""
         return 'ADMIN' if self.is_superuser else self.role
