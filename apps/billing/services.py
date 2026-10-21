@@ -237,6 +237,20 @@ def refund(order, reason):
     return exact
 
 
+def refund_wallet_amount(order, reason, exact):
+    """
+    Сколько возврат refund(order, reason) реально зачислил в кошелёк — для ответа фронту (тост о возврате):
+    refund отдаёт точную сумму, а в кошелёк уходит округлённое вниз вместе с прошлым carry.
+    exact — что вернул refund; 0 — операции не было (не путаем с прошлым возвратом той же причины)
+    """
+    if not exact:
+        return Decimal('0')
+    op = (MoneyOperation.objects.filter(order_type=order._meta.app_label, order_id=order.pk,
+                                        kind=MoneyOperation.Kind.REFUND, reason=reason)
+          .order_by('-created_at').first())
+    return op.wallet_amount
+
+
 def orders_with_leftover(model):
     """Заказы, по которым вернули не всё: budget − показано×spm/1000 − refunded > 0 (сравниваем без деления)"""
     leftover = ExpressionWrapper(

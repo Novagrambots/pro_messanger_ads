@@ -150,6 +150,7 @@ class ModerationMoneyTests(TestCase):
         self.assertEqual(response.status_code, 200)
         # Возврат: (9000/1000) * 5 = 45
         self.assertEqual(response.data['refund_amount'], '45.00')
+        self.assertEqual(response.data['refund_wallet_amount'], '45.00')  # локальный баланс — до копеек
 
         order.refresh_from_db()
         self.assertEqual(order.status, ModerationStatus.BLOCKED)

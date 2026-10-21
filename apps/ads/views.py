@@ -1,6 +1,5 @@
 import logging
 from datetime import date, timedelta
-from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Case, DecimalField, F, FloatField, Prefetch, Q, Value, When
@@ -23,7 +22,7 @@ from apps.ads.serializers import (AdBudgetTopUpSerializer, AdCreateSerializer, A
                                   BudgetOperationSerializer)
 from apps.ads.serving.store import ServingUnavailable
 from apps.billing.models import MoneyOperation
-from apps.billing.services import charge, format_money
+from apps.billing.services import charge, format_money, refund_wallet_amount
 from apps.common.pagination import StandardResultsSetPagination
 from apps.common.schema import ERROR_RESPONSE, ORDER_CREATE_ERROR_RESPONSES
 
@@ -165,15 +164,13 @@ class AdDetailView(generics.GenericAPIView):
             with transaction.atomic():
                 ad = get_object_or_404(self.get_queryset().select_for_update(), pk=pk)
                 refund_amount = ad.soft_delete()
-                # В кошелёк ушло округлённое вниз (вместе с прошлым carry) — берём из операции возврата
-                refund_op = MoneyOperation.objects.filter(order_id=ad.pk, kind=MoneyOperation.Kind.REFUND,
-                                                          reason=MoneyOperation.Reason.DELETE).first()
+                wallet_amount = refund_wallet_amount(ad, MoneyOperation.Reason.DELETE, refund_amount)
         except ServingUnavailable:
             return Response({'error': SERVING_DOWN}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response({
             'message': 'Объявление удалено, остаток бюджета возвращён',
             'refund_amount': format_money(refund_amount),
-            'refund_wallet_amount': format_money(refund_op.wallet_amount if refund_op else Decimal('0')),
+            'refund_wallet_amount': format_money(wallet_amount),
         })
 
 

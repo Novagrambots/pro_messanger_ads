@@ -6,7 +6,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.ads.models import Ad, AdReport, AdRevision, AdStatus
-from apps.billing.services import format_money
+from apps.billing.models import MoneyOperation
+from apps.billing.services import format_money, refund_wallet_amount
 from apps.common.models import ModerationStatus
 from apps.common.pagination import StandardResultsSetPagination
 from apps.common.permissions import IsModerator, IsSuperAdmin
@@ -165,9 +166,14 @@ REFUND_RESPONSE = {
         'message': {'type': 'string'},
         'order_id': {'type': 'string', 'format': 'uuid'},
         'status': {'type': 'string'},
-        'refund_amount': {'type': 'string', 'format': 'decimal'},
+        'refund_amount': {'type': 'string', 'format': 'decimal', 'description': 'Точный остаток из заказа'},
+        'refund_wallet_amount': {'type': 'string', 'format': 'decimal',
+                                 'description': 'Сколько реально пришло на баланс владельца (в AdGram — целые '
+                                                'сумы, дробь копится в carry). Это число показывать в тосте'},
     },
 }
+# Решение модератора → причина операции возврата (по ней ищем, сколько ушло в кошелёк)
+REFUND_REASONS = {'reject': MoneyOperation.Reason.REJECT, 'block': MoneyOperation.Reason.BLOCK}
 
 
 class BaseModerationDecisionView(APIView):
@@ -231,6 +237,8 @@ class BaseModerationDecisionView(APIView):
         if refund_amount is not None:
             # Возврат точный (до 6 знаков) — ровные суммы отдаём как раньше: "45.00"
             response_data['refund_amount'] = format_money(refund_amount)
+            response_data['refund_wallet_amount'] = format_money(
+                refund_wallet_amount(order, REFUND_REASONS[self.action], refund_amount))
 
         return Response(response_data, status=status.HTTP_200_OK)
 

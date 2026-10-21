@@ -8,11 +8,13 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, connection, transaction
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 
+from apps.account.services import create_user_with_balance
 from apps.ads.models import Ad, AdDecision, AdReport, AdRevision, AdStateError, AdStatus, Placement
-from apps.ads.tests import (SPORTS, client_for, create_ad, make_local_user, setUpModule,  # noqa: F401
-                            tearDownModule)
+from apps.ads.tests import (ADGRAM_SETTINGS, SPORTS, client_for, create_ad, make_local_user,  # noqa: F401
+                            setUpModule, tearDownModule)
+from apps.billing.adgram_client import OperationResult
 from apps.billing.models import Balance, MoneyOperation as Op
 from apps.notifications.models import Notification
 from apps.partner.models import ChannelEarning
@@ -109,6 +111,7 @@ class AdDecisionTests(ModerationBase):
         response = self.mod(f'ads/{declined.pk}/decline/', {'reason': 'Не по правилам'})
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data['refund_amount'], '10000.004')
+        self.assertEqual(response.data['refund_wallet_amount'], '10000.00')  # на баланс — до копеек
         balance = Balance.objects.get(user=self.owner)
         self.assertEqual((balance.amount, balance.carry), (before + Decimal('10000.00'), Decimal('0.004')))
         self.assertEqual(self.refresh(declined).moderation_reason, 'Не по правилам')
@@ -118,8 +121,28 @@ class AdDecisionTests(ModerationBase):
         Ad.objects.filter(pk=blocked.pk).update(spent=Decimal('1234.5678'))
         response = self.mod(f'ads/{blocked.pk}/block/', {'reason': 'Нарушение'})
         self.assertEqual(response.data['refund_amount'], '8765.4362')  # 10000.004 − 1234.5678
+        self.assertEqual(response.data['refund_wallet_amount'], '8765.43')
         self.assertEqual(self.refresh(blocked).status, AdStatus.BLOCKED)
         self.assertEqual(Op.objects.filter(kind=Op.Kind.REFUND).count(), 2)
+
+    @override_settings(**ADGRAM_SETTINGS)
+    def test_adgram_owner_gets_whole_sums(self):
+        # Владелец из AdGram: в кошелёк уходят только целые сумы, дробь копится в carry
+        owner = create_user_with_balance(username='ag_cl1', adgram_user_id='cl1')
+        owner_client = client_for(owner)
+        ok = OperationResult(status='done', balance_after=Decimal('0'))
+        with patch('apps.billing.adgram_client.debit', return_value=ok):
+            declined, blocked = (self.new_ad(owner_client) for _ in range(2))
+        response = self.mod(f'ads/{declined.pk}/decline/', {'reason': 'Нет'})
+        self.assertEqual((response.data['refund_amount'], response.data['refund_wallet_amount']),
+                         ('10000.00', '10000.00'))
+
+        self.assertEqual(self.mod(f'ads/{blocked.pk}/approve/').status_code, 200)
+        Ad.objects.filter(pk=blocked.pk).update(spent=Decimal('0.4'))
+        response = self.mod(f'ads/{blocked.pk}/block/', {'reason': 'Нарушение'})
+        self.assertEqual((response.data['refund_amount'], response.data['refund_wallet_amount']),
+                         ('9999.60', '9999.00'))
+        self.assertEqual(Balance.objects.get(user=owner).carry, Decimal('0.6'))
 
     def test_reason_required(self):
         ad = self.new_ad()

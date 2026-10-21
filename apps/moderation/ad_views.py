@@ -12,7 +12,8 @@ from rest_framework.views import APIView
 
 from apps.ads.models import Ad, AdReport, AdRevision, AdStateError, AdStatus, Placement
 from apps.ads.serving.store import ServingUnavailable
-from apps.billing.services import format_money
+from apps.billing.models import MoneyOperation
+from apps.billing.services import format_money, refund_wallet_amount
 from apps.common.pagination import StandardResultsSetPagination
 from apps.common.permissions import IsModerator
 from apps.common.schema import ERROR_RESPONSE
@@ -27,6 +28,8 @@ DECISION_ERROR_RESPONSES = {
     409: ERROR_RESPONSE,  # уже не в том статусе (решили раньше / правку заменили)
     503: ERROR_RESPONSE,  # блокировка: Redis выдачи недоступен — без него нельзя записать показанное
 }
+# Решение модератора → причина операции возврата (по ней ищем, сколько ушло в кошелёк)
+REFUND_REASONS = {'decline': MoneyOperation.Reason.REJECT, 'block': MoneyOperation.Reason.BLOCK}
 SERVING_DOWN_RESPONSE = {'error': 'Сервис выдачи рекламы временно недоступен, попробуйте позже'}
 AD_DECISION_RESPONSE = {
     'type': 'object',
@@ -34,7 +37,11 @@ AD_DECISION_RESPONSE = {
         'message': {'type': 'string'},
         'ad_id': {'type': 'string', 'format': 'uuid'},
         'status': {'type': 'string'},
-        'refund_amount': {'type': 'string', 'format': 'decimal', 'description': 'Только у decline и block'},
+        'refund_amount': {'type': 'string', 'format': 'decimal',
+                          'description': 'Только у decline и block: точный остаток из объявления'},
+        'refund_wallet_amount': {'type': 'string', 'format': 'decimal',
+                                 'description': 'Сколько реально пришло на баланс владельца (в AdGram — целые '
+                                                'сумы, дробь копится в carry). Это число показывать в тосте'},
     },
 }
 REVISION_DECISION_RESPONSE = {
@@ -134,6 +141,8 @@ class BaseAdDecisionView(APIView):
         data = {'message': messages[self.action], 'ad_id': str(ad.pk), 'status': ad.status}
         if refund_amount is not None:
             data['refund_amount'] = format_money(refund_amount)
+            data['refund_wallet_amount'] = format_money(refund_wallet_amount(ad, REFUND_REASONS[self.action],
+                                                                             refund_amount))
         return Response(data)
 
 
