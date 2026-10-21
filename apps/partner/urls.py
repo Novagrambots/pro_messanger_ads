@@ -1,11 +1,12 @@
 from django.urls import path, re_path
 
 from .views import (PublicEarningView, ClaimChannelView, MyEarningsView,
-                    WithdrawEarningView, AdminEarningsListView, ChannelMetaView)
+                    WithdrawEarningView, AdminEarningsListView, AdminEarningsSummaryView, ChannelMetaView)
 
 urlpatterns = [
     path('earnings/', PublicEarningView.as_view(), name='partner-public-earnings'),
     path('admin/earnings/', AdminEarningsListView.as_view(), name='partner-admin-earnings'),
+    path('admin/earnings/summary/', AdminEarningsSummaryView.as_view(), name='partner-admin-earnings-summary'),
     path('claim/', ClaimChannelView.as_view(), name='partner-claim'),
     path('my/', MyEarningsView.as_view(), name='partner-my-earnings'),
     path('withdraw/', WithdrawEarningView.as_view(), name='partner-withdraw'),

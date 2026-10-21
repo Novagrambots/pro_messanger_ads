@@ -1,5 +1,5 @@
 from django.db.models import Count, F
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -19,14 +19,24 @@ from .serializers import (AnnouncementClientSerializer, AnnouncementManageSerial
 class AnnouncementManageListCreateView(generics.ListCreateAPIView):
     """
     GET — все баннеры со статистикой (клики, закрытия), POST — создать баннер.
+    ?active=true — только те, что сейчас показываются (тот же отбор, что у выдачи NovaGram).
     Только суперадмин.
     """
     serializer_class = AnnouncementManageSerializer
     permission_classes = [IsSuperAdmin]
     pagination_class = StandardResultsSetPagination
 
+    @extend_schema(parameters=[OpenApiParameter(
+        'active', str, enum=['true'],
+        description='true — только показываемые сейчас (включён и в окне дат); другие значения игнорируются')])
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
     def get_queryset(self):
-        return (Announcement.objects
+        queryset = Announcement.objects.all()
+        if self.request.query_params.get('active') == 'true':
+            queryset = queryset.showing()
+        return (queryset
                 .annotate(dismissals_count_agg=Count('dismissals'))
                 .select_related('created_by')
                 .order_by('-created_at'))

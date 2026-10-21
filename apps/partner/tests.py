@@ -49,3 +49,40 @@ class AdminEarningsListTests(TestCase):
 
         by_id = self.client.get('/api/partner/admin/earnings/?search=222')
         self.assertEqual([i['channel_id'] for i in by_id.data['results']], [222])
+
+
+class AdminEarningsSummaryTests(TestCase):
+    """Итоги по списку заработков для главной в админке AdGram"""
+    URL = '/api/partner/admin/earnings/summary/'
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(User.objects.create_superuser('boss', 'boss@test.uz', 'pass12345'))
+
+    def test_empty_gives_zeros(self):
+        response = self.client.get(self.URL)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'total_earned': '0.00', 'available': '0.00', 'channels': 0})
+
+    def test_sums_exact_in_one_query(self):
+        ChannelEarning.objects.create(channel_id=111, channel_name='Крутой канал',
+                                      available=Decimal('10.500001'), total_earned=Decimal('99.25'))
+        ChannelEarning.objects.create(channel_id=222, channel_name='Безымянный', total_earned=Decimal('5.000002'))
+        ChannelEarning.objects.create(channel_id=333, channel_name='Новый')
+        with self.assertNumQueries(1):
+            response = self.client.get(self.URL)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'total_earned': '104.250002', 'available': '10.500001', 'channels': 3})
+        # channels — столько же, сколько строк в самом списке
+        self.assertEqual(self.client.get('/api/partner/admin/earnings/').data['count'], 3)
+
+        # Тот же ?search=, что у списка
+        by_name = self.client.get(f'{self.URL}?search=крутой').data
+        self.assertEqual(by_name, {'total_earned': '99.25', 'available': '10.500001', 'channels': 1})
+
+    def test_advertiser_and_moderator_403(self):
+        for role in (User.Role.ADVERTISER, User.Role.MODERATOR):
+            client = APIClient()
+            client.force_authenticate(User.objects.create_user(f'u_{role}', password='pass12345', role=role))
+            self.assertEqual(client.get(self.URL).status_code, 403)
+        self.assertEqual(APIClient().get(self.URL).status_code, 401)

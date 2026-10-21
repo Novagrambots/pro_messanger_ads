@@ -71,6 +71,13 @@ class AdminEarningSerializer(serializers.ModelSerializer):
         return obj.get_share_rate()
 
 
+class AdminEarningsSummarySerializer(serializers.Serializer):
+    """Итоги по всем каналам списка заработков (суммы — как в списке, строкой)"""
+    total_earned = MoneyField()
+    available = MoneyField()
+    channels = serializers.IntegerField(read_only=True, help_text='Сколько каналов в списке')
+
+
 class ClaimRequestSerializer(serializers.Serializer):
     channel_id = serializers.IntegerField(required=True)
     # Необязательная метка-имя для витрины (если клиент его знает).

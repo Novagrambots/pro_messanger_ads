@@ -208,3 +208,46 @@ class AnnouncementClientTests(TestCase):
 
         titles = [b['title'] for b in self._active().data]
         self.assertEqual(titles, ['Срочный', 'Обычный новее', 'Обычный'])
+
+
+@override_settings(AD_SERVER_API_KEY=API_KEY)
+class ManageActiveFilterTests(TestCase):
+    """?active=true в управлении — ровно то, что сейчас отдаёт выдача NovaGram"""
+
+    def setUp(self):
+        now = timezone.now()
+        self.showing = create_banner(title='Бессрочный')
+        self.showing_window = create_banner(title='В окне', starts_at=now - timedelta(days=1),
+                                            ends_at=now + timedelta(days=1))
+        create_banner(title='Выключен', is_active=False)
+        create_banner(title='Будущий', starts_at=now + timedelta(days=1))
+        create_banner(title='Истёк', starts_at=now - timedelta(days=3), ends_at=now - timedelta(days=1))
+
+        self.boss = APIClient()
+        self.boss.force_authenticate(User.objects.create_superuser('boss', 'boss@test.uz', 'pass12345'))
+
+    def titles(self, query=''):
+        response = self.boss.get(f'/api/banner_ads/manage/?page_size=100{query}')
+        self.assertEqual(response.status_code, 200, response.data)
+        return {item['title'] for item in response.data['results']}
+
+    def test_only_showing_now(self):
+        self.assertEqual(self.titles('&active=true'), {'Бессрочный', 'В окне'})
+
+    def test_same_as_client_feed(self):
+        client_feed = APIClient().post('/api/banner_ads/active/', {'viewer_id': 'v1'}, format='json',
+                                       HTTP_X_API_KEY=API_KEY)
+        self.assertEqual(client_feed.status_code, 200)
+        self.assertEqual({item['title'] for item in client_feed.data}, self.titles('&active=true'))
+
+    def test_without_param_or_other_values_all(self):
+        everything = {'Бессрочный', 'В окне', 'Выключен', 'Будущий', 'Истёк'}
+        for query in ('', '&active=false', '&active=1', '&active=мусор'):
+            with self.subTest(query=query):
+                self.assertEqual(self.titles(query), everything)
+
+    def test_advertiser_and_moderator_403(self):
+        for role in (User.Role.ADVERTISER, User.Role.MODERATOR):
+            client = APIClient()
+            client.force_authenticate(User.objects.create_user(f'u_{role}', password='pass12345', role=role))
+            self.assertEqual(client.get('/api/banner_ads/manage/?active=true').status_code, 403)

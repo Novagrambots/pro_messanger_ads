@@ -1,4 +1,7 @@
+from decimal import Decimal
+
 from django.db import models, transaction
+from django.db.models.functions import Coalesce
 from drf_spectacular.utils import extend_schema, OpenApiParameter
 from rest_framework import generics, status, permissions
 from rest_framework.response import Response
@@ -10,7 +13,8 @@ from apps.common.schema import ERROR_RESPONSE, MESSAGE_RESPONSE
 from .models import ChannelEarning
 from .serializers import (
     PublicEarningSerializer, MyEarningSerializer, ClaimRequestSerializer,
-    WithdrawRequestSerializer, MessageSerializer, AdminEarningSerializer, ChannelMetaSerializer,
+    WithdrawRequestSerializer, MessageSerializer, AdminEarningSerializer, AdminEarningsSummarySerializer,
+    ChannelMetaSerializer,
 )
 
 
@@ -87,6 +91,22 @@ class ClaimChannelView(APIView):
         return Response({'message': 'Канал закреплён за вами'}, status=status.HTTP_201_CREATED)
 
 
+ZERO = models.Value(Decimal('0'), output_field=models.DecimalField(max_digits=20, decimal_places=6))
+
+
+def admin_earnings(request):
+    """Заработки каналов для суперадмина: ?search= по имени канала или точному channel_id"""
+    queryset = ChannelEarning.objects.all()
+    search = request.query_params.get('search', '').strip()
+    if search:
+        # channel_id числовой — icontains по нему нельзя, ищем точное совпадение
+        filters = models.Q(channel_name__icontains=search)
+        if search.lstrip('-').isdigit():
+            filters |= models.Q(channel_id=int(search))
+        queryset = queryset.filter(filters)
+    return queryset
+
+
 class AdminEarningsListView(generics.ListAPIView):
     """
     Все заработки каналов-площадок для админ-панели. Только суперадмин.
@@ -102,17 +122,23 @@ class AdminEarningsListView(generics.ListAPIView):
         return super().get(request, *args, **kwargs)
 
     def get_queryset(self):
-        queryset = (ChannelEarning.objects
-                    .select_related('owner')
-                    .order_by('-total_earned'))
-        search = self.request.query_params.get('search', '').strip()
-        if search:
-            # channel_id числовой — icontains по нему нельзя, ищем точное совпадение
-            filters = models.Q(channel_name__icontains=search)
-            if search.lstrip('-').isdigit():
-                filters |= models.Q(channel_id=int(search))
-            queryset = queryset.filter(filters)
-        return queryset
+        return admin_earnings(self.request).select_related('owner').order_by('-total_earned')
+
+
+class AdminEarningsSummaryView(APIView):
+    """Итоги по списку заработков (главная в админке AdGram). Тот же ?search=. Только суперадмин"""
+    permission_classes = [IsSuperAdmin]
+
+    @extend_schema(parameters=[OpenApiParameter('search', str, description='Как в /api/partner/admin/earnings/')],
+                   responses={200: AdminEarningsSummarySerializer})
+    def get(self, request):
+        # Один агрегатный запрос; пустая таблица — Sum даёт None, отсюда Coalesce
+        totals = admin_earnings(request).aggregate(
+            total_earned=Coalesce(models.Sum('total_earned'), ZERO),
+            available=Coalesce(models.Sum('available'), ZERO),
+            channels=models.Count('pk'),
+        )
+        return Response(AdminEarningsSummarySerializer(totals).data)
 
 
 class MyEarningsView(generics.ListAPIView):

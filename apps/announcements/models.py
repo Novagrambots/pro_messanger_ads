@@ -7,6 +7,13 @@ from django.db.models import Q
 from django.utils import timezone
 
 
+class AnnouncementQuerySet(models.QuerySet):
+    def showing(self):
+        """Баннер сейчас показывается: включён и now в окне дат. Одно условие для выдачи и админки"""
+        now = timezone.now()
+        return self.filter(Q(ends_at__isnull=True) | Q(ends_at__gte=now), is_active=True, starts_at__lte=now)
+
+
 class Announcement(models.Model):
     """
     Системный баннер над списком чатов в NovaGram (как «поздравь с др» у Telegram).
@@ -36,6 +43,8 @@ class Announcement(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    objects = AnnouncementQuerySet.as_manager()
+
     class Meta:
         verbose_name = 'Баннер'
         verbose_name_plural = 'Баннеры'
@@ -59,10 +68,7 @@ class Announcement(models.Model):
         его всё равно не увидят — записи о закрытии остаются. Чтобы показать
         всем заново, нужно создать новый баннер.
         """
-        now = timezone.now()
-        return (cls.objects
-                .filter(is_active=True, starts_at__lte=now)
-                .filter(Q(ends_at__isnull=True) | Q(ends_at__gte=now))
+        return (cls.objects.showing()
                 # exclude по связи — это NOT EXISTS по уникальному индексу (announcement, viewer_id)
                 .exclude(dismissals__viewer_id=viewer_id)
                 .order_by('-priority', '-created_at'))
