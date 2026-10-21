@@ -34,7 +34,7 @@ class IsModerator(permissions.BasePermission):
 
 
 class IsSuperAdmin(permissions.BasePermission):
-    """Пускает только суперадмина (создаётся через createsuperuser)."""
+    """Пускает только суперадмина: ADMIN из AdGram или createsuperuser (аварийный вход)."""
     message = 'Требуются права суперадмина.'
 
     def has_permission(self, request, view):

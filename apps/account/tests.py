@@ -20,12 +20,14 @@ ADGRAM_USER_ID = 'clxadgramuser0001'
 
 
 def make_adgram_token(user_id=ADGRAM_USER_ID, role='USER', secret=ADGRAM_SECRET,
-                      expires_in=timedelta(days=7), with_exp=True, username='adgram_name'):
-    """Токен как у AdGram: HS256, payload {userId, username, role}, срок 7 дней"""
+                      expires_in=timedelta(minutes=15), with_exp=True, username='adgram_name', aud='novagram'):
+    """Токен как у AdGram для NovaGram: HS256, payload {userId, username, role, aud: novagram}, 15 минут"""
     now = datetime.now(timezone.utc)
     payload = {'username': username, 'role': role, 'iat': now}
     if user_id is not None:
         payload['userId'] = user_id
+    if aud is not None:
+        payload['aud'] = aud
     if with_exp:
         payload['exp'] = now + expires_in
     return jwt.encode(payload, secret, algorithm='HS256')
@@ -181,19 +183,88 @@ class AdGramAuthTests(TestCase):
         self.assertEqual(response.data['detail'], 'В токене AdGram нет корректного userId')
         self.assertFalse(User.objects.exclude(adgram_user_id=None).exists())
 
-    def test_adgram_admin_is_plain_advertiser(self):
-        """role=ADMIN в AdGram не даёт в new_dvs ни модератора, ни суперадмина"""
+    def test_token_without_aud_rejected(self):
+        """Основной 7-дневный токен AdGram (без aud) в new_dvs не годится"""
+        token = make_adgram_token(aud=None, expires_in=timedelta(days=7))
+        response = adgram_client(token).get('/api/auth/profile/')
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.data['detail'], 'Некорректный токен AdGram')
+        self.assertFalse(User.objects.filter(adgram_user_id=ADGRAM_USER_ID).exists())
+
+    def test_foreign_aud_rejected(self):
+        response = adgram_client(make_adgram_token(aud='adgram')).get('/api/auth/profile/')
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.data['detail'], 'Некорректный токен AdGram')
+        self.assertFalse(User.objects.filter(adgram_user_id=ADGRAM_USER_ID).exists())
+
+    def test_adgram_admin_is_superadmin(self):
+        """role=ADMIN в AdGram = суперадмин: модерация и эндпоинты суперадмина, но не Django-админка"""
         client = adgram_client(make_adgram_token(role='ADMIN'))
         profile = client.get('/api/auth/profile/')
         self.assertEqual(profile.status_code, 200)
-        self.assertEqual(profile.data['role'], 'ADVERTISER')
+        self.assertEqual(profile.data['role'], 'ADMIN')
 
         user = User.objects.get(adgram_user_id=ADGRAM_USER_ID)
-        self.assertFalse(user.is_superuser)
+        self.assertTrue(user.is_superuser)
         self.assertFalse(user.is_staff)
-        self.assertFalse(user.is_moderator)
+        self.assertFalse(user.has_usable_password())
+        self.assertEqual(user.role, User.Role.ADVERTISER)  # role токен не трогает
+        self.assertEqual(client.get('/api/moderation/pending_count/').status_code, 200)
+        self.assertEqual(client.get('/api/auth/users/').status_code, 200)  # IsSuperAdmin
+
+    def test_admin_removed_in_adgram_loses_superadmin(self):
+        adgram_client(make_adgram_token(role='ADMIN')).get('/api/auth/profile/')
+        client = adgram_client(make_adgram_token(role='USER'))
+        self.assertEqual(client.get('/api/auth/profile/').data['role'], 'ADVERTISER')
+        self.assertFalse(User.objects.get(adgram_user_id=ADGRAM_USER_ID).is_superuser)
         self.assertEqual(client.get('/api/moderation/pending_count/').status_code, 403)
         self.assertEqual(client.get('/api/auth/users/').status_code, 403)
+
+    def test_manual_superuser_overwritten_by_token(self):
+        """Источник правды — AdGram: is_superuser, выставленный руками у ag_…, снимется следующим запросом"""
+        adgram_client(make_adgram_token()).get('/api/auth/profile/')
+        User.objects.filter(adgram_user_id=ADGRAM_USER_ID).update(is_superuser=True)
+        adgram_client(make_adgram_token(role='USER')).get('/api/auth/profile/')
+        self.assertFalse(User.objects.get(adgram_user_id=ADGRAM_USER_ID).is_superuser)
+
+    def test_moderator_kept_with_user_token(self):
+        """MODERATOR хранит new_dvs: токен с USER его не сбрасывает"""
+        adgram_client(make_adgram_token()).get('/api/auth/profile/')
+        User.objects.filter(adgram_user_id=ADGRAM_USER_ID).update(role=User.Role.MODERATOR)
+
+        client = adgram_client(make_adgram_token(role='USER'))
+        self.assertEqual(client.get('/api/auth/profile/').data['role'], 'MODERATOR')
+        self.assertEqual(client.get('/api/moderation/pending_count/').status_code, 200)
+        self.assertEqual(client.get('/api/auth/users/').status_code, 403)  # модератор — не суперадмин
+
+        # Сняли админа в AdGram — модератором в new_dvs он остаётся
+        adgram_client(make_adgram_token(role='ADMIN')).get('/api/auth/profile/')
+        adgram_client(make_adgram_token(role='USER')).get('/api/auth/profile/')
+        user = User.objects.get(adgram_user_id=ADGRAM_USER_ID)
+        self.assertEqual(user.role, User.Role.MODERATOR)
+        self.assertFalse(user.is_superuser)
+
+    def test_own_superuser_not_touched(self):
+        """createsuperuser (без adgram_user_id) токенами AdGram не затрагивается"""
+        boss = User.objects.create_superuser('boss', password='Str0ngPass!23')
+        adgram_client(make_adgram_token(role='USER')).get('/api/auth/profile/')
+        adgram_client(make_adgram_token(user_id='clxother', role='ADMIN')).get('/api/auth/profile/')
+        boss.refresh_from_db()
+        self.assertTrue(boss.is_superuser)
+        self.assertTrue(boss.is_staff)
+
+        client = APIClient()
+        login = client.post('/api/auth/login/', {'username': 'boss', 'password': 'Str0ngPass!23'}, format='json')
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.data['access']}")
+        self.assertEqual(client.get('/api/auth/users/').status_code, 200)
+
+    def test_same_role_no_extra_update(self):
+        """Админство не поменялось — лишнего UPDATE нет (как с именем)"""
+        client = adgram_client(make_adgram_token(role='ADMIN'))
+        client.get('/api/auth/profile/')
+        with patch.object(User.objects, 'filter', wraps=User.objects.filter) as user_filter:
+            client.get('/api/auth/profile/')
+        self.assertEqual(user_filter.call_count, 1)
 
     def test_own_login_and_moderator_token_still_work(self):
         """Свой логин new_dvs (simplejwt) работает как раньше, в т.ч. у модератора"""
