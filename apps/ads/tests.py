@@ -337,6 +337,28 @@ class AdAdGramTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data['budget'], '10100.40')
 
+    def test_delete_shows_whole_sums_sent_to_adgram(self, _push):
+        ok = OperationResult(status='done', balance_after=Decimal('0'))
+        with patch('apps.billing.adgram_client.debit', return_value=ok):
+            ad_id = create_ad(self.client, budget='10000').data['id']
+        Ad.objects.filter(pk=ad_id).update(spent=Decimal('0.4'))
+
+        response = self.client.delete(f'/api/ads/{ad_id}/')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['refund_amount'], '9999.60')  # точный остаток — как раньше
+        self.assertEqual(response.data['refund_wallet_amount'], '9999.00')  # в AdGram — только целые сумы
+        self.assertEqual(balance_of(self.user).carry, Decimal('0.6'))
+
+        # Прошлый carry докладывается: в кошелёк может уйти больше точного остатка
+        Balance.objects.filter(user=self.user).update(carry=Decimal('0.5'))
+        with patch('apps.billing.adgram_client.debit', return_value=ok):
+            ad_id = create_ad(self.client, budget='10000').data['id']  # бюджет забрал carry: 10000.5
+        Balance.objects.filter(user=self.user).update(carry=Decimal('0.7'))
+        response = self.client.delete(f'/api/ads/{ad_id}/')
+        self.assertEqual((response.data['refund_amount'], response.data['refund_wallet_amount']),
+                         ('10000.50', '10001.00'))
+        self.assertEqual(balance_of(self.user).carry, Decimal('0.2'))
+
 
 @patch('apps.notifications.services._enqueue_push')
 class AdTransitionTests(TestCase):
@@ -424,6 +446,7 @@ class AdTransitionTests(TestCase):
         response = self.client.delete(f'/api/ads/{ad.pk}/')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['refund_amount'], '9998.7655')
+        self.assertEqual(response.data['refund_wallet_amount'], '9998.76')  # локальный баланс — до копеек
         self.assertEqual(balance_of(self.user).amount, before + Decimal('9998.76'))
         self.assertEqual(balance_of(self.user).carry, Decimal('0.0055'))
         self.assertEqual(self.refresh(ad).status, AdStatus.DELETED)
@@ -438,7 +461,7 @@ class AdTransitionTests(TestCase):
         ad = self.new_ad()
         call_locked(ad, 'decline', self.boss, 'нет')
         response = self.client.delete(f'/api/ads/{ad.pk}/')
-        self.assertEqual(response.data['refund_amount'], '0.00')
+        self.assertEqual((response.data['refund_amount'], response.data['refund_wallet_amount']), ('0.00', '0.00'))
         self.assertEqual(Op.objects.filter(kind=Op.Kind.REFUND).count(), 1)
 
     def test_stopped_top_up_reactivates(self, _push):

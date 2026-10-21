@@ -1,5 +1,6 @@
 import logging
 from datetime import date, timedelta
+from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Case, DecimalField, F, FloatField, Prefetch, Q, Value, When
@@ -30,7 +31,13 @@ from apps.common.schema import ERROR_RESPONSE, ORDER_CREATE_ERROR_RESPONSES
 STATE_ERROR_RESPONSE = {'type': 'object', 'additionalProperties': {'type': 'string'}}
 DELETE_RESPONSE = {
     'type': 'object',
-    'properties': {'message': {'type': 'string'}, 'refund_amount': {'type': 'string', 'format': 'decimal'}},
+    'properties': {
+        'message': {'type': 'string'},
+        'refund_amount': {'type': 'string', 'format': 'decimal', 'description': 'Точный остаток из объявления'},
+        'refund_wallet_amount': {'type': 'string', 'format': 'decimal',
+                                 'description': 'Сколько реально пришло на баланс (в AdGram — целые сумы, '
+                                                'дробь копится в carry). Это число показывать в тосте'},
+    },
 }
 # Redis выдачи недоступен: без него нельзя записать уже показанное — деньги не двигаем
 SERVING_DOWN = 'Сервис выдачи рекламы временно недоступен, попробуйте позже'
@@ -158,11 +165,15 @@ class AdDetailView(generics.GenericAPIView):
             with transaction.atomic():
                 ad = get_object_or_404(self.get_queryset().select_for_update(), pk=pk)
                 refund_amount = ad.soft_delete()
+                # В кошелёк ушло округлённое вниз (вместе с прошлым carry) — берём из операции возврата
+                refund_op = MoneyOperation.objects.filter(order_id=ad.pk, kind=MoneyOperation.Kind.REFUND,
+                                                          reason=MoneyOperation.Reason.DELETE).first()
         except ServingUnavailable:
             return Response({'error': SERVING_DOWN}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response({
             'message': 'Объявление удалено, остаток бюджета возвращён',
             'refund_amount': format_money(refund_amount),
+            'refund_wallet_amount': format_money(refund_op.wallet_amount if refund_op else Decimal('0')),
         })
 
 
