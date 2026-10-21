@@ -1,3 +1,5 @@
+import re
+
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
@@ -45,6 +47,12 @@ class AnnouncementManageSerializer(serializers.ModelSerializer):
             setattr(instance, field, value)
         instance.save(update_fields=list(validated_data.keys()) + ['updated_at'])
         return instance
+
+    def validate_link(self, value):
+        # Баннер видят все юзеры приложения — пускаем только https:// и deep-link tg://
+        if value and not re.match(r'(https|tg)://.', value, re.IGNORECASE):
+            raise serializers.ValidationError('Ссылка должна начинаться с https:// или tg://')
+        return value
 
     def validate(self, attrs):
         # PATCH может прислать только одну из дат — вторую берём из instance

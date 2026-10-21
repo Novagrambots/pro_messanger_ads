@@ -54,6 +54,28 @@ class AnnouncementManageTests(TestCase):
         self.assertEqual(response.data['created_by'], 'boss')
         self.assertEqual(response.data['dismissals_count'], 0)
 
+    def test_link_only_https_or_tg(self):
+        """Ссылка баннера: пусто, https:// или tg://, иначе 400 по полю link"""
+        for link in ('', 'https://example.com', 'HTTPS://Example.com', 'tg://resolve?domain=test'):
+            response = self.client_boss.post('/api/banner_ads/manage/', {
+                'title': 'Баннер', 'text': 'Текст', 'link': link,
+            }, format='json')
+            self.assertEqual(response.status_code, 201, link)
+
+        for link in ('http://example.com', 't.me/abc', 'javascript:alert(1)', 'https://', 'tg://'):
+            response = self.client_boss.post('/api/banner_ads/manage/', {
+                'title': 'Баннер', 'text': 'Текст', 'link': link,
+            }, format='json')
+            self.assertEqual(response.status_code, 400, link)
+            self.assertIn('link', response.data)
+
+        # PATCH проверяется так же
+        banner = create_banner()
+        response = self.client_boss.patch(f'/api/banner_ads/manage/{banner.id}/',
+                                          {'link': 'http://example.com'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('link', response.data)
+
     def test_ends_before_starts_rejected(self):
         now = timezone.now()
         response = self.client_boss.post('/api/banner_ads/manage/', {
