@@ -277,7 +277,7 @@ SPECTACULAR_SETTINGS = {
                 'type': 'apiKey',
                 'in': 'header',
                 'name': 'X-API-Key',
-                'description': 'Серверный ключ NovaGram (settings.AD_SERVER_API_KEY)',
+                'description': 'Серверный ключ NovaGram (один из AD_SERVER_API_KEYS / AD_SERVER_API_KEY)',
             },
         },
     },
@@ -319,9 +319,11 @@ CELERY_TIMEZONE = 'Asia/Tashkent'
 # канале через поле ChannelEarning.share_rate. Строкой — чтобы Decimal был точным.
 PARTNER_SHARE_RATE = os.getenv('PARTNER_SHARE_RATE', '0.5')
 
-# Серверный API-ключ для доступа к показу/клику рекламы (server-to-server с NovaGram).
-# Пусто → доступ к этим эндпоинтам закрыт (fail-closed). Секрет — в .env.
+# Серверные API-ключи (заголовок X-API-Key) для выдачи рекламы, показа/клика старых заказов и баннеров.
+# Ключ зашит в приложение, поэтому ключей может быть несколько: AD_SERVER_API_KEYS через запятую
+# (новый и старый на время смены) + AD_SERVER_API_KEY (как раньше). Все пустые → эндпоинты закрыты.
 AD_SERVER_API_KEY = os.getenv('AD_SERVER_API_KEY')
+AD_SERVER_API_KEYS = os.getenv('AD_SERVER_API_KEYS', '')
 
 # Путь к сервисному JSON-ключу Firebase (push-уведомления в NovaGram Business).
 # Пусто или файла нет → push молча отключён, in-app уведомления работают.
@@ -345,7 +347,9 @@ ADS_TOKEN_TTL = int(os.getenv('ADS_TOKEN_TTL', '3600'))   # срок жизни 
 ADS_RATE_VIEWER_SERVE = int(os.getenv('ADS_RATE_VIEWER_SERVE', '60'))
 ADS_RATE_VIEWER_EVENTS = int(os.getenv('ADS_RATE_VIEWER_EVENTS', '60'))
 ADS_RATE_VIEWER_REPORTS = int(os.getenv('ADS_RATE_VIEWER_REPORTS', '10'))
-ADS_RATE_IP = int(os.getenv('ADS_RATE_IP', '1200'))
+# На IP — с большим запасом: у мобильных операторов CGNAT, за одним адресом тысячи абонентов
+# (2000 активных × ~3 запроса в минуту = 6000, запас ×10). Накрутку держат лимиты на зрителя
+ADS_RATE_IP = int(os.getenv('ADS_RATE_IP', '60000'))
 # IP клиента: заголовок, которому доверяем (например CF-Connecting-IP за Cloudflare).
 # Пусто → первый адрес X-Forwarded-For, иначе REMOTE_ADDR
 CLIENT_IP_HEADER = os.getenv('CLIENT_IP_HEADER', '')

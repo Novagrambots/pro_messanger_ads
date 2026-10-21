@@ -158,6 +158,17 @@ class AnnouncementClientTests(TestCase):
             wrong_key = self.server.post(url, body, format='json', HTTP_X_API_KEY='wrong')
             self.assertIn(wrong_key.status_code, (401, 403))
 
+    @override_settings(AD_SERVER_API_KEYS='new-key,old-key', AD_SERVER_API_KEY='')
+    def test_several_api_keys(self):
+        """Баннеры принимают любой из ключей AD_SERVER_API_KEYS"""
+        for key in ('new-key', 'old-key'):
+            response = self.server.post('/api/banner_ads/active/', {'viewer_id': 'v1'}, format='json',
+                                        HTTP_X_API_KEY=key)
+            self.assertEqual(response.status_code, 200, key)
+        response = self.server.post('/api/banner_ads/active/', {'viewer_id': 'v1'}, format='json',
+                                    HTTP_X_API_KEY=API_KEY)
+        self.assertIn(response.status_code, (401, 403))  # старый ключ из списка убрали — не пускаем
+
     def test_date_window(self):
         now = timezone.now()
         create_banner(title='Будущий', starts_at=now + timedelta(days=1))

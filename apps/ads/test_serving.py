@@ -41,6 +41,7 @@ from apps.directories.models import Location, TelegramPeer
 from apps.moderation.test_ads import make_moderator
 from apps.notifications.models import Notification
 from apps.partner.models import ChannelEarning, EarningTransaction
+from core import settings as project_settings
 
 User = get_user_model()
 
@@ -101,7 +102,7 @@ class ServingBase(TestCase):
     def serve(self, user_id=1, query=QUERY, placement=Placement.SEARCH, **headers):
         body = {'placement': placement, 'user_id': user_id, 'context': {'query': query}, 'lang': 'uz'}
         return self.client.post('/api/ads/serve/', json.dumps(body), content_type='application/json',
-                                HTTP_X_API_KEY=API_KEY, **headers)
+                                **{'HTTP_X_API_KEY': API_KEY, **headers})
 
     def serve_ad(self, user_id=1, query=QUERY):
         response = self.serve(user_id, query)
@@ -294,6 +295,35 @@ class SelectionTests(ServingBase):
         self.assertEqual(self.client.get('/api/ads/serve/', HTTP_X_API_KEY=API_KEY).status_code, 405)
         with override_settings(VIEWER_HASH_SECRET=''), self.assertLogs('apps.ads.serving.views', 'ERROR'):
             self.assertEqual(post(good).status_code, 503)  # секреты не заданы — выдача закрыта
+
+    def test_several_api_keys(self):
+        """Новый и старый ключ работают одновременно — на выдаче, событиях и жалобах"""
+        def post(url, key):
+            return self.client.post(url, json.dumps({'user_id': 1}), content_type='application/json',
+                                    HTTP_X_API_KEY=key)
+
+        with override_settings(AD_SERVER_API_KEYS='new-key,old-key', AD_SERVER_API_KEY=''):
+            for key in ('new-key', 'old-key'):
+                self.assertEqual(self.serve(HTTP_X_API_KEY=key).status_code, 200, key)
+            self.assertEqual(self.serve(HTTP_X_API_KEY=API_KEY).status_code, 403)
+            for url in ('/api/ads/serve/', '/api/ads/events/', '/api/ads/report/'):
+                self.assertEqual(post(url, 'wrong').status_code, 403, url)
+                self.assertEqual(post(url, 'old-key').status_code, 400, url)  # ключ принят, дальше — тело
+        with override_settings(AD_SERVER_API_KEYS='', AD_SERVER_API_KEY=''):
+            self.assertEqual(self.serve(HTTP_X_API_KEY='').status_code, 403)  # ключей нет — закрыто
+
+    def test_cgnat_one_ip_many_viewers(self):
+        """
+        Мобильный оператор (CGNAT): тысячи зрителей за одним IP. При лимите на IP по умолчанию
+        их не режем (старые 1200 в минуту резали). Лимит на зрителя при этом работает
+        """
+        self.active_ad()
+        self.reload()
+        ip = {'HTTP_X_FORWARDED_FOR': '213.230.64.1'}
+        with override_settings(ADS_RATE_IP=project_settings.ADS_RATE_IP, ADS_RATE_VIEWER_SERVE=60):
+            codes = {self.serve(user_id, **ip).status_code for user_id in range(1, 1502)}
+            self.assertEqual(codes, {200})
+            self.assertEqual([self.serve(1, **ip).status_code for _ in range(60)][-1], 429)  # зритель 1: 61-й
 
     def test_rate_limits(self):
         self.active_ad()

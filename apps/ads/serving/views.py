@@ -12,11 +12,11 @@ import redis
 from django.conf import settings
 from django.db import DatabaseError
 from django.http import JsonResponse
-from django.utils.crypto import constant_time_compare
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from apps.ads.models import Ad, AdReport
+from apps.common.permissions import has_server_api_key
 from apps.directories.telegram import normalize_username
 
 from . import events as ad_events
@@ -47,16 +47,9 @@ def _log_outage(message):
         logger.exception(message)
 
 
-def _has_api_key(request):
-    """Как HasServerApiKey: ключ не задан на бэкенде — доступ закрыт"""
-    expected = settings.AD_SERVER_API_KEY
-    provided = request.headers.get('X-API-Key')
-    return bool(expected and provided and constant_time_compare(provided, expected))
-
-
 def _parse(request):
     """Общие проверки → (data, viewer, None) или (None, None, ответ с ошибкой)"""
-    if not _has_api_key(request):
+    if not has_server_api_key(request):
         return None, None, _error('Неверный или отсутствующий API-ключ.', 403)
     if not tokens.is_configured():
         logger.error('Выдача объявлений не настроена: нет VIEWER_HASH_SECRET или ADS_TOKEN_SECRET')
