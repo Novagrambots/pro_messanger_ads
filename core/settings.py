@@ -216,18 +216,22 @@ SIMPLE_JWT = {
 # (иначе ломается свой логин) — это проверяется при старте в apps/account/apps.py.
 ADGRAM_JWT_SECRET = os.getenv('ADGRAM_JWT_SECRET', '')
 
+# manage.py test: тесты не должны зависеть от .env (Redis кэша, токен бота и т.п.)
+TESTING = sys.argv[1:2] == ['test']
+
 # Общий кэш Django (справочники, троттлинг): в docker — Redis, база 1 (база 0 занята Celery).
-# Без переменной — память процесса (локально и в тестах). Нужен общий: правка справочника
+# Без переменной — память процесса (локально и всегда в тестах). Нужен общий: правка справочника
 # в админке должна сбросить кэш сразу у всех воркеров gunicorn
-CACHE_REDIS_URL = os.getenv('CACHE_REDIS_URL', '')
+CACHE_REDIS_URL = '' if TESTING else os.getenv('CACHE_REDIS_URL', '')
 if CACHE_REDIS_URL:
     CACHES = {'default': {'BACKEND': 'django.core.cache.backends.redis.RedisCache', 'LOCATION': CACHE_REDIS_URL}}
 else:
     CACHES = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
 
 # Токен бота для Bot API getChat: числовой id и точный тип канала по t.me-имени.
-# Без него данные берутся только со страницы t.me — и у каналов не будет числового id
-TELEGRAM_RESOLVER_BOT_TOKEN = os.getenv('TELEGRAM_RESOLVER_BOT_TOKEN', '')
+# Без него данные берутся только со страницы t.me — и у каналов не будет числового id.
+# В тестах пусто (кому нужен — задают через override_settings), иначе тесты полезут в Bot API
+TELEGRAM_RESOLVER_BOT_TOKEN = '' if TESTING else os.getenv('TELEGRAM_RESOLVER_BOT_TOKEN', '')
 
 # Общий баланс с AdGram: внутреннее API AdGram (заголовок X-Internal-Key).
 # Не заданы → юзеры AdGram не могут создавать заказы (503), а возвраты копятся
@@ -326,7 +330,6 @@ FIREBASE_CREDENTIALS_FILE = os.getenv('FIREBASE_CREDENTIALS_FILE', '')
 # ============================ Выдача объявлений v2 (apps/ads/serving) ============================
 # Отдельный Redis выдачи: бюджеты, счётчики, дельты показов (AOF + noeviction — см. docker-compose).
 # Тесты ходят в свою базу (ADS_REDIS_TEST_URL) — тесты выдачи очищают её перед каждым тестом
-TESTING = sys.argv[1:2] == ['test']
 if TESTING:
     ADS_REDIS_URL = os.getenv('ADS_REDIS_TEST_URL', 'redis://localhost:6379/15')
 else:
