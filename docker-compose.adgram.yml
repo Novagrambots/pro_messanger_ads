@@ -1,0 +1,31 @@
+# Включение AdGram на сервере: web и celery_worker ходят во внутреннее API AdGram
+# (ADGRAM_INTERNAL_URL=http://adgram-backend:4000) по docker-сети AdGram, а не через интернет.
+# Подключается в .env на сервере:  COMPOSE_FILE=docker-compose.yml:docker-compose.adgram.yml
+# Локально без сети AdGram этот файл не нужен — всё работает как раньше.
+#
+# Кто ходит в AdGram: web (списание/возврат/баланс, похожие каналы) и celery_worker
+# (добивание и компенсации денег). serving, celery_flush и celery_beat в AdGram не ходят.
+#
+# ВАЖНО: в сети AdGram есть свой сервис redis. Если web подключён к обеим сетям, имя redis
+# разрешается в Redis AdGram (проверено) — поэтому здесь свои сервисы указаны по container_name.
+x-own-hosts: &own-hosts
+  - DATABASES_HOST=channel_db_2
+  - CELERY_BROKER_URL=redis://channel_redis:6379/0
+  - CELERY_RESULT_BACKEND=redis://channel_redis:6379/0
+  - CACHE_REDIS_URL=redis://channel_redis:6379/1
+  - ADS_REDIS_URL=redis://channel_redis_ads:6379/0
+
+services:
+  web:
+    environment: *own-hosts
+    networks: [default, adgram]
+
+  celery_worker:
+    environment: *own-hosts
+    networks: [default, adgram]
+
+networks:
+  adgram:
+    external: true
+    # Сеть compose-проекта AdGram (/root/AdGram → adgram_default); другое имя — ADGRAM_NETWORK в .env
+    name: ${ADGRAM_NETWORK:-adgram_default}
