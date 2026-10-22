@@ -219,8 +219,8 @@ class AdCreateSerializer(serializers.Serializer):
                 errors[field] = exc.detail
 
         data['text'] = check('text', lambda: validators.check_text(placement, data['text']))
-        # Каналы и боты проверяем в Telegram: свежие — из кэша, новые — по очереди, с общим лимитом
-        # времени (20 с) и числа новых имён (20) на весь запрос — и для ссылки, и для таргетинга
+        # Каналы и боты проверяем в Telegram: уже проверенные — из базы, новые — параллельно, с общим
+        # лимитом времени (20 с) на весь запрос — и для ссылки, и для таргетинга
         batch = PeerBatch()
         username = check('url', lambda: validators.parse_promoted_url(data['url']))
         promoted_peer = None

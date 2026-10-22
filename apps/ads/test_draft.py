@@ -15,6 +15,7 @@ from apps.ads.models import Ad, AdDraft, AdMedia, AdStatus, InitialStatus, Place
 from apps.ads.tasks import cleanup_ad_media
 from apps.ads.tests import (KUNUZ_ID, call_locked, client_for, create_ad, make_local_user, setUpModule,  # noqa: F401
                             tearDownModule)
+from apps.directories.models import TelegramPeer
 from apps.directories.tests import TempMediaMixin
 
 User = get_user_model()
@@ -74,6 +75,15 @@ class DraftApiTests(DraftBase):
         response = self.client.put(URL, {'data': {}}, format='json')
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data['data'], {})
+
+    def test_autosave_does_not_check_telegram(self):
+        # Автосохранение раз в 3 с: каналы в Telegram не проверяем (сеть в этих тестах запрещена),
+        # TelegramPeer не создаём — проверка только при создании объявления
+        channels = [f'newchan{i}' for i in range(100)]
+        form = {'placement': 'CHANNEL_MESSAGE', 'targeting': {'channels': channels, 'exclude_channels': channels}}
+        response = self.client.put(URL, {'data': form}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(TelegramPeer.objects.filter(username__startswith='newchan').exists())
 
     def test_not_object_400(self):
         for value in ([1, 2], 'текст', 5, None):

@@ -1,6 +1,7 @@
 """
 Тесты похожих каналов и ботов (этап 5б). AdGram замокан: норма, 404, 429, 503, таймаут, 401.
 """
+import time
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -15,7 +16,8 @@ from apps.billing import adgram_client
 from apps.billing.adgram_client import AdGramRejected, AdGramUnavailable, TgPeer
 from apps.directories.models import TelegramPeer
 from apps.directories.similar import COOLDOWN_KEY
-from apps.directories.tests import CHANNEL_PAGE, JPEG, FakeResponse, TempMediaMixin, fake
+from apps.directories.tasks import refresh_peers
+from apps.directories.tests import CHANNEL_PAGE, JPEG, FakeResponse, SlowTelegram, TempMediaMixin, fake
 
 ADGRAM = {'ADGRAM_INTERNAL_URL': 'http://adgram.test', 'ADGRAM_INTERNAL_KEY': 'test-key'}
 PeerType = TelegramPeer.PeerType
@@ -165,13 +167,64 @@ class SimilarTests(TempMediaMixin, TestCase):
 
     def test_429_cooldown(self):
         with patch('apps.billing.adgram_client.similar_channels',
-                   side_effect=AdGramUnavailable('429', retry_after=3600)):
+                   side_effect=AdGramUnavailable('429', retry_after=3600)), \
+                self.assertLogs('apps.directories.similar', 'WARNING') as logs:
             self.assertEqual(self.get('daryo').status_code, 503)
         self.assertTrue(cache.get(COOLDOWN_KEY))
+        self.assertIn('similar —, аватары 0/0 за — → 503 (AdGram не ответил: 429)', logs.output[0])
         with self.search as search, self.similar as similar:
             self.assertEqual(self.get('kunuz').status_code, 503)  # остываем — в AdGram не ходим
         search.assert_not_called()
         similar.assert_not_called()
+
+    def test_avatars_in_parallel_with_limit(self):
+        # 6 аватаров разом; один «завис» — ждём не дольше AVATAR_SECONDS и отдаём без него
+        photos = [f'https://cdn4.telesco.pe/file/p{i}.jpg' for i in range(6)]
+        results = [peer(f'h:s{i}', f'simchan{i}', photo=photos[i]) for i in range(6)]
+        tg = SlowTelegram(delay=0.2, hang=[photos[5]])
+        self.addCleanup(tg.release.set)
+        with self.search, patch('apps.billing.adgram_client.similar_channels', return_value=results), \
+                patch('apps.directories.telegram.requests.get', side_effect=tg), \
+                patch('apps.directories.similar.AVATAR_SECONDS', 1), \
+                self.assertLogs('apps.directories.similar', 'INFO') as logs:
+            started = time.monotonic()
+            response = self.get('kunuz')
+            took = time.monotonic() - started
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(tg.max_active, 6)  # все разом, а не по одному
+        self.assertLess(took, 2.5)  # лимит 1 с, а не 5 с «зависшего»
+        with_avatar = [item['username'] for item in response.data if item['avatar_url']]
+        self.assertEqual(with_avatar, [f'simchan{i}' for i in range(5)])
+        self.assertFalse(TelegramPeer.objects.get(username='simchan5').avatar)
+        # Время этапов — одной строкой
+        self.assertEqual(len(logs.output), 1)
+        self.assertRegex(logs.output[0], r'INFO:apps\.directories\.similar:Похожие channels: имён 1, '
+                                         r'search \d+\.\d с \(запросов 1\), similar \d+\.\d с, '
+                                         r'аватары 5/6 за \d+\.\d с → найдено 6$')
+
+    def test_new_peers_checked_in_background(self):
+        cdn = fake({'https://cdn4.telesco.pe/': FakeResponse(JPEG)})
+        with self.search, self.similar, cdn, patch('apps.directories.similar.refresh_peers.delay') as delay, \
+                self.captureOnCommitCallbacks(execute=True):
+            self.get('kunuz,daryo')
+        delay.assert_called_once_with(['freshnews'])  # только новая запись: uznews и kunuz уже были
+
+        # Из кэша — в AdGram не ходим, новых записей нет, задачу не ставим
+        with self.search, self.similar, patch('apps.directories.similar.refresh_peers.delay') as delay, \
+                self.captureOnCommitCallbacks(execute=True):
+            self.get('kunuz,daryo')
+        delay.assert_not_called()
+
+        # Брокер недоступен — ответ всё равно 200, в лог — warning
+        cache.clear()
+        TelegramPeer.objects.filter(username='freshnews').delete()
+        with self.search, self.similar, cdn, \
+                patch('apps.directories.similar.refresh_peers.delay', side_effect=OSError('broker')), \
+                self.assertLogs('apps.directories.similar', 'WARNING') as logs, \
+                self.captureOnCommitCallbacks(execute=True):
+            response = self.get('kunuz,daryo')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('OSError', logs.output[-1])
 
     def test_input_validation(self):
         for value in ('', 'kun', ','.join(f'channel{i}' for i in range(11)), 'https://evil.example/x'):
@@ -241,3 +294,32 @@ class SimilarThenTargetingTests(TempMediaMixin, TestCase):
                 fake({}):
             response = create_ad(self.client, Placement.CHANNEL_MESSAGE, targeting={'channels': ['daryo']})
         self.assertEqual(response.status_code, 201, response.data)
+
+
+@override_settings(TELEGRAM_RESOLVER_BOT_TOKEN='42:TOKEN')
+class RefreshPeersTests(TempMediaMixin, TestCase):
+    """Фоновая проверка новых записей из «похожих»: тип, числовой id и аватар — до сохранения объявления"""
+
+    def test_checks_only_stale(self):
+        ensure_test_peers()  # kunuz свежий — в Telegram за ним не ходим (иначе FakeTelegram уронит тест)
+        stale = timezone.now() - TelegramPeer.FRESH_FOR - timedelta(minutes=1)
+        TelegramPeer.objects.create(username='freshnews', peer_type=PeerType.CHANNEL, ads_ref='h:fresh',
+                                    fetched_at=stale)
+        routes = {
+            'https://t.me/freshnews': FakeResponse(CHANNEL_PAGE.replace('@kunuz', '@freshnews')),
+            'https://api.telegram.org/bot42:TOKEN/getChat': FakeResponse(json_data={'ok': True, 'result': {
+                'id': -1009876543210, 'type': 'channel', 'title': 'Fresh News'}}),
+            'https://cdn4.telesco.pe/': FakeResponse(JPEG),
+        }
+        with fake(routes):
+            refresh_peers(['freshnews', 'kunuz'])
+        fresh = TelegramPeer.objects.get(username='freshnews')
+        self.assertTrue(fresh.is_fresh())
+        self.assertEqual((fresh.telegram_id, fresh.ads_ref), (-1009876543210, 'h:fresh'))
+        self.assertTrue(fresh.avatar)
+
+        # Telegram не ответил — задача не падает, запись остаётся непроверенной (проверим при сохранении)
+        TelegramPeer.objects.filter(username='freshnews').update(fetched_at=stale)
+        with fake({'https://t.me/freshnews': requests.Timeout('t')}):
+            refresh_peers(['freshnews'])
+        self.assertFalse(TelegramPeer.objects.get(username='freshnews').is_fresh())

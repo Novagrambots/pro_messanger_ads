@@ -18,7 +18,7 @@ from rest_framework import serializers
 from apps.ads.models import Placement, USERS_PLACEMENTS
 from apps.directories import services as directories
 from apps.directories.models import TelegramPeer
-from apps.directories.telegram import (TelegramUnavailable, TooManyUnknown, not_bot_error, not_bots,
+from apps.directories.telegram import (NotCheckedInTime, TelegramUnavailable, not_bot_error, not_bots,
                                       normalize_username as tg_username)
 
 # Устройства NovaGram (пустой список = все устройства).
@@ -38,10 +38,20 @@ TME_LINK_RE = re.compile(r'(?:https?://)?t\.me/([A-Za-z0-9_]+)/?', re.IGNORECASE
 ERR_CHANNELS_WITH_LANGUAGES = 'If specific channels are targeted, the language field must be empty'
 ERR_CHANNELS_WITH_TOPICS = 'If specific channels are targeted, the topic field must be empty'
 ERR_TOPICS_WITHOUT_LANGUAGE = 'You must choose one language when targeting by topic'
-ERR_TOO_MANY_UNKNOWN = 'Слишком много новых каналов за раз (больше 20) — добавьте их по одному'
 ERR_TELEGRAM_DOWN = 'Не удалось проверить в Telegram — он не отвечает, попробуйте ещё раз'
 
 PeerType = TelegramPeer.PeerType
+
+
+def not_checked_in_time_error(count):
+    """Общая ошибка таргетинга: проверенные имена уже сохранены, со второй попытки пройдёт"""
+    if count % 10 == 1 and count % 100 != 11:
+        word = 'канал'
+    elif 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        word = 'канала'
+    else:
+        word = 'каналов'
+    return f'Не успели проверить в Telegram {count} {word} — нажмите «Сохранить» ещё раз'
 
 
 # ===================================== Ссылка, текст =====================================
@@ -325,8 +335,8 @@ def _check_peers(targeting, resolve_peers):
         return
     try:
         peers = resolve_peers(names)
-    except TooManyUnknown:
-        raise serializers.ValidationError(ERR_TOO_MANY_UNKNOWN)
+    except NotCheckedInTime as exc:
+        raise serializers.ValidationError(not_checked_in_time_error(exc.count))
     except TelegramUnavailable:
         raise serializers.ValidationError(ERR_TELEGRAM_DOWN)
 

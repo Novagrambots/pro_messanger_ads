@@ -219,6 +219,18 @@ ADGRAM_JWT_SECRET = os.getenv('ADGRAM_JWT_SECRET', '')
 # manage.py test: тесты не должны зависеть от .env (Redis кэша, токен бота и т.п.)
 TESTING = sys.argv[1:2] == ['test']
 
+# Логи наших приложений (logger apps.*) в консоль, с INFO (например, время этапов «похожих»).
+# Логгеры django / celery / gunicorn не трогаем. propagate=False — иначе в воркере Celery
+# (он вешает свой обработчик на корневой логгер) каждая строка печаталась бы дважды.
+# В тестах — только WARNING, как было (assertLogs уровень ставит сам)
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {'plain': {'format': '%(asctime)s %(levelname)s %(name)s: %(message)s'}},
+    'handlers': {'console': {'class': 'logging.StreamHandler', 'formatter': 'plain'}},
+    'loggers': {'apps': {'handlers': ['console'], 'level': 'WARNING' if TESTING else 'INFO', 'propagate': False}},
+}
+
 # Общий кэш Django (справочники, троттлинг): в docker — Redis, база 1 (база 0 занята Celery).
 # Без переменной — память процесса (локально и всегда в тестах). Нужен общий: правка справочника
 # в админке должна сбросить кэш сразу у всех воркеров gunicorn

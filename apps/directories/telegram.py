@@ -6,6 +6,8 @@
 - имя проверяется регуляркой ДО любого запроса, URL собираем сами — только хосты
   t.me, api.telegram.org и CDN аватаров cdn<цифры>.telesco.pe; редиректы не идём;
 - таймаут 3 с, плюс общий лимит времени на запрос (Deadline);
+- несколько имён проверяем параллельно (не больше WORKERS потоков): в потоках только сеть,
+  запись в базу — в основном потоке;
 - аватар — не больше 1 МБ, тип по сигнатуре файла, храним у себя;
 - ссылки Bot API содержат токен бота: ни URL, ни текст исключений requests (в них URL)
   не попадают ни в логи, ни наружу.
@@ -15,6 +17,7 @@ import html
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 
 import requests
 from django.conf import settings
@@ -29,6 +32,7 @@ logger = logging.getLogger(__name__)
 TIMEOUT = 3
 MAX_PAGE_BYTES = 512 * 1024
 MAX_AVATAR_BYTES = 1024 * 1024
+WORKERS = 8  # сколько имён / картинок качаем одновременно
 HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; NovaGramAds/1.0)', 'Accept-Language': 'en'}
 
 # Имя в Telegram: латиница, цифры, _, начинается с буквы, 4–32 символа
@@ -48,8 +52,12 @@ class DeadlineExceeded(TelegramUnavailable):
     """Кончился общий лимит времени на запрос"""
 
 
-class TooManyUnknown(Exception):
-    """В одном запросе слишком много ещё не проверенных имён"""
+class NotCheckedInTime(DeadlineExceeded):
+    """Часть имён не успели проверить до конца общего лимита времени (проверенные уже сохранены)"""
+
+    def __init__(self, count):
+        super().__init__(f'Не успели проверить имён: {count}')
+        self.count = count
 
 
 class Deadline:
@@ -58,9 +66,12 @@ class Deadline:
     def __init__(self, seconds):
         self.until = time.monotonic() + seconds
 
+    def left(self):
+        return max(0.0, self.until - time.monotonic())
+
     def timeout(self, cap=TIMEOUT):
         """Таймаут очередного запроса: не больше cap и не больше остатка общего лимита"""
-        left = self.until - time.monotonic()
+        left = self.left()
         if left <= 0:
             raise DeadlineExceeded('Кончилось время на проверку в Telegram')
         return min(cap, left)
@@ -116,26 +127,81 @@ def resolve(username, deadline=None):
     return _save(username, info)
 
 
+def is_checked(peer):
+    """
+    Запись можно брать из базы без похода в Telegram: свежая — любая, протухшая — только канал
+    с числовым id или бот (их тип и id со временем не меняются). Протухшие группы, людей,
+    «не найден» и каналы без id (например, из «похожих») проверяем заново
+    """
+    if peer.is_fresh():
+        return True
+    if peer.not_found:
+        return False
+    return peer.peer_type == PeerType.BOT or (peer.peer_type == PeerType.CHANNEL and peer.telegram_id is not None)
+
+
 class PeerBatch:
     """
-    Проверка нескольких имён за один запрос (создание объявления): свежие — из базы,
-    остальные — по очереди, с общим лимитом времени и числа новых имён.
+    Проверка нескольких имён за один запрос (создание объявления): уже проверенные — из базы,
+    остальные — параллельно, с общим лимитом времени. Не успели — NotCheckedInTime
+    (проверенные сохранены, со второй попытки их уже не проверяем).
     """
 
-    def __init__(self, max_unknown=20, seconds=20):
+    def __init__(self, seconds=20):
         self.deadline = Deadline(seconds)
-        self.unknown_left = max_unknown
 
     def resolve(self, usernames):
         names = list(dict.fromkeys(usernames))
-        known = {peer.username: peer for peer in TelegramPeer.objects.filter(username__in=names) if peer.is_fresh()}
-        unknown = [name for name in names if name not in known]
-        if len(unknown) > self.unknown_left:
-            raise TooManyUnknown()
-        self.unknown_left -= len(unknown)
-        for name in unknown:
-            known[name] = resolve(name, self.deadline)
+        known = {peer.username: peer for peer in TelegramPeer.objects.filter(username__in=names) if is_checked(peer)}
+        new = [name for name in names if name not in known]
+        if new:
+            checked, failed = resolve_many(new, self.deadline)
+            if any(error is None or isinstance(error, DeadlineExceeded) for error in failed.values()):
+                raise NotCheckedInTime(len(failed))
+            if failed:
+                raise TelegramUnavailable('Telegram не ответил')
+            known.update(checked)
         return known
+
+
+def resolve_many(usernames, deadline):
+    """
+    Спрашивает Telegram про все имена сразу (параллельно) и сохраняет ответы.
+    Возвращает ({имя: TelegramPeer}, {имя: ошибка}); ошибка None — не успели до конца deadline.
+    """
+    results = run_parallel(lambda name: _fetch(name, deadline), usernames, deadline)
+    checked, failed = {}, {}
+    for name in usernames:
+        result = results.get(name)
+        if isinstance(result, dict):
+            checked[name] = _save(name, result)
+        elif result is None or isinstance(result, TelegramUnavailable):
+            failed[name] = result
+        else:
+            raise result  # не сетевая ошибка — баг, пусть падает
+    return checked, failed
+
+
+def run_parallel(func, items, deadline):
+    """
+    func(item) для каждого item в потоках (не больше WORKERS), ждём не дольше остатка deadline.
+    {item: результат или исключение}; кто не успел — в ответ не попадает.
+    В func — только сеть, без базы (у потока было бы своё соединение с БД).
+    Не успевшие потоки дорабатывают сами: их запросы и так ограничены тем же deadline.
+    """
+    if not items:
+        return {}
+    pool = ThreadPoolExecutor(max_workers=min(WORKERS, len(items)))
+    futures = {pool.submit(func, item): item for item in items}
+    try:
+        done, _ = wait(futures, timeout=deadline.left())
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    results = {}
+    for future in done:
+        error = future.exception()
+        results[futures[future]] = error if error is not None else future.result()
+    return results
 
 
 def _fetch(username, deadline):
