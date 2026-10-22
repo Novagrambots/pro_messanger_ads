@@ -330,8 +330,10 @@ class AdRevisionTests(ModerationBase):
         self.assertIn('text', self.patch_ad(search, {'text': 'текст'}).data)
         self.assertIn('show_channel_picture', self.patch_ad(search, {'show_channel_picture': True}).data)
 
-        # Фото канала поднимает минимальный CPM: 1000 × 1.3 = 1300
-        response = self.patch_ad(ad, {'show_channel_picture': True})
+        # Правка одного креатива без cpm — без проверки минимума: CPM пересчитается при одобрении
+        self.assertEqual(self.patch_ad(ad, {'show_channel_picture': True}).status_code, 202)
+        # cpm прислан явно — проверка как раньше: с фото канала минимум 1000 × 1.3 = 1300
+        response = self.patch_ad(ad, {'show_channel_picture': True, 'cpm': 1200})
         self.assertEqual(response.data['cpm'][0], "CPM can't be less than 1300")
         self.assertEqual(self.patch_ad(ad, {'show_channel_picture': True, 'cpm': 1300}).status_code, 202)
         # Пока правка с фото на проверке, опустить CPM ниже минимума с фото нельзя

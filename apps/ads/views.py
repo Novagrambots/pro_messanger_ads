@@ -152,7 +152,9 @@ class AdDetailView(generics.GenericAPIView):
                 ad = get_object_or_404(self.get_queryset().select_for_update(), pk=pk)
                 ad.update_settings(settings_changes)
                 if creative_changes:
-                    revision = ad.update_creative(creative_changes, request.user)
+                    # CPM прислан в том же запросе — владелец сам назначил цену под новый креатив
+                    revision = ad.update_creative(creative_changes, request.user,
+                                                  reprice='cpm' not in settings_changes)
         except AdStateError as exc:
             return state_error(exc)
         return Response(AdSerializer(ad, context={'request': request}).data,

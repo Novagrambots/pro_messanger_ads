@@ -148,8 +148,33 @@ class AdPricing(models.Model):
 
     def min_cpm_for(self, placement, targeting, show_channel_picture, media):
         """То же по данным объявления: media — AdMedia или None, targeting — уже проверенный"""
-        specific = placement == Placement.CHANNEL_MESSAGE and bool((targeting or {}).get('channels'))
-        return self.min_cpm(placement, show_channel_picture, media.media_type if media else None, specific)
+        return self.min_cpm(placement, show_channel_picture, media.media_type if media else None,
+                            _specific_channels(placement, targeting))
+
+    def markup_percent_for(self, placement, targeting, show_channel_picture, media):
+        """Наценка по данным объявления (та же, что в min_cpm_for)"""
+        return self.markup_percent(show_channel_picture, media.media_type if media else None,
+                                   _specific_channels(placement, targeting))
+
+    def reprice_cpm(self, ad, show_channel_picture, media):
+        """
+        CPM объявления после смены креатива (как в Telegram Ads): наценка выросла — CPM вырос, упала — вернулся.
+        cpm × (100 + новая) / (100 + старая): вверх до сума при росте, вниз при падении — тогда
+        «добавили фото → убрали» возвращает ровно исходный CPM. Не ниже минимума нового креатива.
+        Наценка не изменилась — CPM тот же (даже если цены с тех пор поднялись)
+        """
+        old = self.markup_percent_for(ad.placement, ad.targeting, ad.show_channel_picture, ad.media)
+        new = self.markup_percent_for(ad.placement, ad.targeting, show_channel_picture, media)
+        if new == old:
+            return ad.cpm
+        exact = Decimal(ad.cpm) * (100 + new) / (100 + old)
+        cpm = math.ceil(exact) if new > old else math.floor(exact)
+        return max(cpm, self.min_cpm_for(ad.placement, ad.targeting, show_channel_picture, media))
+
+
+def _specific_channels(placement, targeting):
+    """Сообщение в канале с явным списком каналов — у фото и видео своя («specific») наценка"""
+    return placement == Placement.CHANNEL_MESSAGE and bool((targeting or {}).get('channels'))
 
 
 class AdMedia(models.Model):
@@ -452,19 +477,18 @@ class Ad(models.Model):
         """Правка креатива без ревизии: объявление и так на проверке или правит суперадмин"""
         return self.status == AdStatus.IN_REVIEW or author.is_superuser
 
-    def update_creative(self, changes, author):
+    def update_creative(self, changes, author, reprice=True):
         """
-        Правка креатива (text, show_channel_picture, other_info) — значения уже проверил сериализатор.
+        Правка креатива (text, show_channel_picture, other_info, media) — значения уже проверил сериализатор.
         Возвращает новую ревизию на проверке или None, если правка применена сразу.
         Пока ревизия на проверке, объявление крутится в прежнем виде (как у Telegram).
+        reprice=False — CPM владелец прислал в том же запросе: при прямом применении не пересчитываем
         """
         if self.status in (AdStatus.DECLINED, AdStatus.BLOCKED, AdStatus.DELETED):
             raise AdStateError(f'Объявление в статусе «{self.get_status_display()}» менять нельзя')
 
         if self.applies_creative_directly(author):
-            for field, value in changes.items():
-                setattr(self, field, value)
-            self.save(update_fields=[*changes, 'updated_at'])
+            self.apply_creative(changes, reprice)
             return None
 
         # На проверке всегда одна ревизия: новая правка собирается поверх висящей и заменяет её
@@ -477,6 +501,23 @@ class Ad(models.Model):
         from apps.notifications.services import notify_moderators_new_revision
         notify_moderators_new_revision(revision)
         return revision
+
+    def apply_creative(self, changes, reprice=True):
+        """
+        Креатив вступает в силу (прямая правка или одобренная ревизия; объявление — под локом).
+        Изменилась наценка (фото / видео / фото канала) — CPM пересчитывается в ту же сторону.
+        Деньги не двигаются — меняется только цена показа
+        """
+        fields = [*changes, 'updated_at']
+        if reprice:
+            cpm = AdPricing.load().reprice_cpm(self, changes.get('show_channel_picture', self.show_channel_picture),
+                                               changes.get('media', self.media))
+            if cpm != self.cpm:
+                self.cpm = cpm
+                fields.append('cpm')
+        for field, value in changes.items():
+            setattr(self, field, value)
+        self.save(update_fields=fields)
 
     def update_settings(self, changes):
         """
@@ -549,8 +590,9 @@ class Ad(models.Model):
 class AdRevision(models.Model):
     """
     Правка креатива объявления, ждущая модератора. Пока ревизия на проверке, объявление
-    крутится в прежнем виде; одобрили — поля переносятся в объявление (статус не меняется).
-    Деньги ревизии не двигают. На проверке у объявления всегда не больше одной ревизии.
+    крутится в прежнем виде; одобрили — поля переносятся в объявление (статус не меняется),
+    CPM пересчитывается по наценке (Ad.apply_creative). Деньги ревизии не двигают.
+    На проверке у объявления всегда не больше одной ревизии.
     """
 
     class Status(models.TextChoices):
@@ -619,9 +661,8 @@ class AdRevision(models.Model):
     def approve(self, ad, moderator):
         """Переносит креатив в объявление (ad — взят под локом через lock_with_ad). Статус объявления тот же"""
         self._check_pending(ad, 'одобрить')
-        for field in self.CREATIVE_FIELDS:
-            setattr(ad, field, getattr(self, field))
-        ad.save(update_fields=[*self.CREATIVE_FIELDS, 'updated_at'])
+        # CPM пересчитывается от того, что стоит сейчас (наценка живого креатива → наценка правки)
+        ad.apply_creative({field: getattr(self, field) for field in self.CREATIVE_FIELDS})
         self._set_moderation(self.Status.APPROVED, moderator)
         ad._log_decision(moderator, AdDecision.Action.REVISION_APPROVED, revision=self)
 

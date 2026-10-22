@@ -388,6 +388,120 @@ class MediaRevisionTests(MediaBase):
         self.assertEqual(revision['proposed']['media']['id'], str(photo.pk))
 
 
+class CpmRepriceTests(MediaBase):
+    """
+    CPM меняется вместе с наценкой креатива, когда тот вступает в силу (как в Telegram Ads):
+    cpm × (100 + новая %) / (100 + старая %) — вверх при росте, вниз при падении, не ниже минимума.
+    Цены по умолчанию: база 1000, фото 50 %, видео 70 %, фото канала 30 %, фото / видео при
+    конкретных каналах 80 % / 100 %
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.moderator = make_local_user('moder')
+        self.ad = self.new_ad(cpm=1001)
+
+    def new_ad(self, **overrides):
+        overrides.setdefault('targeting', {'languages': ['uz']})
+        response = create_ad(self.client, Placement.CHANNEL_MESSAGE, **overrides)
+        self.assertEqual(response.status_code, 201, response.data)
+        return Ad.objects.get(pk=response.data['id'])
+
+    def patch(self, data, status=200):
+        response = self.client.patch(f'/api/ads/{self.ad.pk}/', data, format='json')
+        self.assertEqual(response.status_code, status, response.data)
+        return response
+
+    def cpm(self):
+        return Ad.objects.get(pk=self.ad.pk).cpm
+
+    def approve_ad(self):
+        with transaction.atomic():
+            Ad.objects.select_for_update().get(pk=self.ad.pk).approve(self.moderator)
+
+    def decide_revision(self, approve=True):
+        with transaction.atomic():
+            ad, revision = AdRevision.lock_with_ad(self.ad.revisions.get(status=AdRevision.Status.PENDING).pk)
+            if approve:
+                revision.approve(ad, self.moderator)
+            else:
+                revision.decline(ad, self.moderator, 'Не подходит')
+
+    def test_photo_added_and_removed_directly(self):
+        # Объявление ещё на проверке — креатив применяется сразу, CPM — тоже
+        photo = self.photo()
+        self.assertEqual(self.patch({'media': str(photo.pk)}).data['cpm'], 1502)  # 1001 × 1.5 = 1501.5 → вверх
+        self.assertEqual(self.patch({'media': None}).data['cpm'], 1001)           # 1502 / 1.5 = 1001.33 → вниз
+        self.assertEqual(self.patch({'show_channel_picture': True}).data['cpm'], 1302)  # 1301.3 → вверх
+        self.assertEqual(self.patch({'show_channel_picture': False}).data['cpm'], 1001)
+
+    def test_photo_added_and_removed_via_moderation(self):
+        photo = self.photo()
+        self.approve_ad()
+        response = self.patch({'media': str(photo.pk)}, status=202)
+        self.assertEqual(response.data['cpm'], 1001)  # пока правка на проверке — крутится прежний вариант
+        self.decide_revision()
+        self.assertEqual(self.cpm(), 1502)
+
+        self.patch({'media': None}, status=202)
+        self.assertEqual(self.cpm(), 1502)
+        self.decide_revision()
+        self.assertEqual(self.cpm(), 1001)
+
+        self.patch({'show_channel_picture': True}, status=202)
+        self.decide_revision()
+        self.assertEqual(self.cpm(), 1302)
+        self.patch({'show_channel_picture': False}, status=202)
+        self.decide_revision()
+        self.assertEqual(self.cpm(), 1001)
+
+    def test_declined_revision_keeps_cpm(self):
+        photo = self.photo()
+        self.approve_ad()
+        self.patch({'media': str(photo.pk)}, status=202)
+        self.decide_revision(approve=False)
+        ad = Ad.objects.get(pk=self.ad.pk)
+        self.assertEqual((ad.cpm, ad.media), (1001, None))
+
+    def test_explicit_cpm_checked_as_before(self):
+        photo = self.photo()
+        # Сразу (на проверке): cpm прислан вместе с фото — минимум с фото, без пересчёта
+        response = self.patch({'media': str(photo.pk), 'cpm': 1400}, status=400)
+        self.assertEqual(response.data['cpm'][0], "CPM can't be less than 1500")
+        self.assertEqual(self.patch({'media': str(photo.pk), 'cpm': 1600}).data['cpm'], 1600)
+        self.assertEqual(self.patch({'cpm': 1499}, status=400).data['cpm'][0], "CPM can't be less than 1500")
+
+        # Через модерацию: cpm применяется сразу, при одобрении — пересчёт от CPM на этот момент
+        self.ad = self.new_ad(cpm=1000)
+        self.approve_ad()
+        response = self.patch({'media': str(photo.pk), 'cpm': 1400}, status=400)
+        self.assertEqual(response.data['cpm'][0], "CPM can't be less than 1500")
+        self.assertEqual(self.patch({'media': str(photo.pk), 'cpm': 1600}, status=202).data['cpm'], 1600)
+        self.decide_revision()
+        self.assertEqual(self.cpm(), 2400)
+
+    def test_markup_changes_and_minimum(self):
+        photo, video = self.photo(), self.ready_video()
+        self.assertEqual(self.patch({'text': 'Новый текст'}).data['cpm'], 1001)  # наценка та же — CPM тот же
+        self.assertEqual(self.patch({'media': str(photo.pk)}).data['cpm'], 1502)
+        self.assertEqual(self.patch({'media': str(self.photo().pk)}).data['cpm'], 1502)  # фото → фото
+        self.assertEqual(self.patch({'media': str(video.pk)}).data['cpm'], 1703)  # 1502 × 170 / 150 = 1702.27
+        self.assertEqual(self.patch({'media': None}).data['cpm'], 1001)          # 1703 / 1.7 = 1001.76
+
+        # Не ниже минимума нового креатива: суперадмин поднял базовый CPM, пока креатив был с фото канала
+        self.assertEqual(self.patch({'show_channel_picture': True}).data['cpm'], 1302)
+        AdPricing.objects.filter(pk=1).update(min_cpm_channel_message=1200)
+        self.assertEqual(self.patch({'text': 'Ещё текст'}).data['cpm'], 1302)  # наценка та же — не трогаем
+        self.assertEqual(self.patch({'show_channel_picture': False}).data['cpm'], 1200)  # 1001 → минимум 1200
+
+    def test_specific_channels_markup(self):
+        # Конкретные каналы: фото — 80 %
+        self.ad = self.new_ad(cpm=1000, targeting={'channels': ['kunuz']})
+        photo = self.photo()
+        self.assertEqual(self.patch({'media': str(photo.pk)}).data['cpm'], 1800)
+        self.assertEqual(self.patch({'media': None}).data['cpm'], 1000)
+
+
 class CleanupTests(MediaBase):
     def old(self, media, days=2):
         AdMedia.objects.filter(pk=media.pk).update(created_at=timezone.now() - timedelta(days=days))

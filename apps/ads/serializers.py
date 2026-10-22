@@ -292,7 +292,9 @@ FORBIDDEN_FIELD_MESSAGES = {
 class AdUpdateSerializer(serializers.Serializer):
     """
     PATCH владельца. Настройки и title меняются сразу; креатив (text, show_channel_picture,
-    other_info) — через ревизию на модерации (если объявление уже одобрено).
+    other_info, media) — через ревизию на модерации (если объявление уже одобрено).
+    Когда креатив вступает в силу и меняется наценка (фото / видео / фото канала), CPM
+    пересчитывается: cpm × (100 + новая %) / (100 + старая %), не ниже минимума.
     """
     title = serializers.CharField(required=False, max_length=255)
     text = serializers.CharField(required=False, allow_blank=True)
@@ -345,15 +347,17 @@ class AdUpdateSerializer(serializers.Serializer):
         if ('media' in data or 'show_channel_picture' in data) and media and picture:
             raise serializers.ValidationError({'media': ERR_MEDIA_WITH_PICTURE})
 
-        # Минимальный CPM зависит от креатива (наценки за медиа и фото канала). Пока правка на проверке,
-        # объявление может получить её в любой момент — поэтому берём более строгий из двух минимумов
-        if {'cpm', 'show_channel_picture', 'media'} & set(data):
+        # CPM прислан явно — он не ниже минимума (зависит от наценки креатива). Пока правка на проверке,
+        # объявление может получить её в любой момент — поэтому берём более строгий из двух минимумов.
+        # Правка одного креатива без cpm — без проверки: CPM пересчитает сервер, когда креатив
+        # вступит в силу (Ad.apply_creative)
+        if 'cpm' in data:
             pricing = AdPricing.load()
             min_cpm = pricing.min_cpm_for(ad.placement, ad.targeting, picture, media)
             if not ad.applies_creative_directly(self.context['request'].user):
                 min_cpm = max(min_cpm, pricing.min_cpm_for(ad.placement, ad.targeting, ad.show_channel_picture,
                                                            ad.media))
-            if data.get('cpm', ad.cpm) < min_cpm:
+            if data['cpm'] < min_cpm:
                 raise serializers.ValidationError({'cpm': f"CPM can't be less than {min_cpm}"})
         return data
 
