@@ -147,6 +147,10 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost",
     "https://nonmutational-hipolito-unravaged.ngrok-free.dev"
 ]
+# Стенд на другом домене (например, https://novadev.vipads.uz): свои адреса через запятую,
+# со схемой — Django сверяет origin целиком. Без переменной список как выше
+CSRF_TRUSTED_ORIGINS += [origin.strip() for origin in os.getenv('CSRF_TRUSTED_ORIGINS_EXTRA', '').split(',')
+                         if origin.strip()]
 
 # TLS терминируется на системном nginx хоста, до Django запрос доходит по http.
 # Этот заголовок (его пробрасывают nginx-ы) говорит Django, что оригинальный запрос был https.
