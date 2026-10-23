@@ -160,13 +160,31 @@ class AdDecisionTests(ModerationBase):
         self.assertEqual(self.mod(f'ads/{ad.pk}/approve/').status_code, 409)
         self.assertEqual(self.mod(f'ads/{ad.pk}/decline/', {'reason': 'поздно'}).status_code, 409)
 
-    def test_own_ad_is_403_but_superadmin_can(self):
+    def test_moderator_moderates_own_ad(self):
+        # Свои объявления модератор модерирует сам (у старых заказов и каналов запрет остаётся)
         own = self.new_ad(client=self.mod_client)
-        self.assertEqual(self.mod(f'ads/{own.pk}/approve/').status_code, 403)
-        self.assertEqual(self.mod(f'ads/{own.pk}/block/', {'reason': 'x'}).status_code, 403)
-        self.assertEqual(self.refresh(own).status, AdStatus.IN_REVIEW)
-        # Суперадмин может, как у старых заказов
-        self.assertEqual(self.mod(f'ads/{own.pk}/approve/', client=client_for(self.boss)).status_code, 200)
+        self.assertEqual(self.mod(f'ads/{own.pk}/approve/').status_code, 200)
+        self.assertEqual(self.refresh(own).status, AdStatus.ACTIVE)
+
+        # Правка креатива модератором — не сразу, а через ревизию; её он тоже решает сам
+        for action, data in (('approve', {}), ('decline', {'reason': 'Передумал'})):
+            with self.subTest(action=action):
+                response = self.mod_client.patch(f'/api/ads/{own.pk}/', {'text': f'Правка {action}'}, format='json')
+                self.assertEqual(response.status_code, 202, response.data)
+                revision = own.revisions.get(status=Rev.PENDING)
+                self.assertEqual(self.mod(f'ads/revisions/{revision.pk}/{action}/', data).status_code, 200)
+        self.assertEqual(self.refresh(own).text, 'Правка approve')
+
+        declined = self.new_ad(client=self.mod_client)
+        self.assertEqual(self.mod(f'ads/{declined.pk}/decline/', {'reason': 'Сам отклонил'}).status_code, 200)
+        self.assertEqual(self.mod(f'ads/{own.pk}/block/', {'reason': 'Сам заблокировал'}).status_code, 200)
+        self.assertEqual((self.refresh(declined).status, self.refresh(own).status),
+                         (AdStatus.DECLINED, AdStatus.BLOCKED))
+
+        decisions = AdDecision.objects.filter(ad__in=[own, declined])
+        self.assertEqual(sorted(decisions.values_list('action', flat=True)),
+                         sorted(['APPROVED', 'REVISION_APPROVED', 'REVISION_DECLINED', 'BLOCKED', 'DECLINED']))
+        self.assertEqual(set(decisions.values_list('moderator', flat=True)), {self.moderator.pk})
 
     def test_advertiser_has_no_access(self):
         ad = self.new_ad()

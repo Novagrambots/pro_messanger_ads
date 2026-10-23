@@ -23,7 +23,7 @@ from .ad_serializers import (AdReportGroupSerializer, ModerationAdDetailSerializ
 from .serializers import ModerationReasonSerializer
 
 DECISION_ERROR_RESPONSES = {
-    403: ERROR_RESPONSE,  # своё объявление модерировать нельзя
+    403: ERROR_RESPONSE,  # не модератор (своё объявление модератор модерирует сам)
     404: ERROR_RESPONSE,
     409: ERROR_RESPONSE,  # уже не в том статусе (решили раньше / правку заменили)
     503: ERROR_RESPONSE,  # блокировка: Redis выдачи недоступен — без него нельзя записать показанное
@@ -53,14 +53,6 @@ REVISION_DECISION_RESPONSE = {
         'status': {'type': 'string'},
     },
 }
-
-
-def is_own(user, ad):
-    """Модератор не модерирует свои объявления (суперадмин может — как у старых заказов)"""
-    return ad.user_id == user.id and not user.is_superuser
-
-
-OWN_AD_RESPONSE = {'error': 'Нельзя модерировать собственное объявление'}
 
 
 class PendingAdsListView(generics.ListAPIView):
@@ -121,8 +113,6 @@ class BaseAdDecisionView(APIView):
         try:
             with transaction.atomic():
                 ad = get_object_or_404(Ad.objects.select_for_update(), pk=pk)
-                if is_own(request.user, ad):
-                    return Response(OWN_AD_RESPONSE, status=status.HTTP_403_FORBIDDEN)
                 if self.action == 'approve':
                     ad.approve(request.user)
                 else:
@@ -196,8 +186,6 @@ class BaseRevisionDecisionView(APIView):
                     ad, revision = AdRevision.lock_with_ad(pk)
                 except AdRevision.DoesNotExist:
                     return Response({'error': 'Правка не найдена'}, status=status.HTTP_404_NOT_FOUND)
-                if is_own(request.user, ad):
-                    return Response(OWN_AD_RESPONSE, status=status.HTTP_403_FORBIDDEN)
                 if self.action == 'approve':
                     revision.approve(ad, request.user)
                 else:
@@ -273,9 +261,7 @@ class ReviewAdReportView(APIView):
     def post(self, request, pk):
         try:
             with transaction.atomic():
-                report = get_object_or_404(AdReport.objects.select_for_update().select_related('ad'), pk=pk)
-                if is_own(request.user, report.ad):
-                    return Response(OWN_AD_RESPONSE, status=status.HTTP_403_FORBIDDEN)
+                report = get_object_or_404(AdReport.objects.select_for_update(), pk=pk)
                 report.mark_reviewed(request.user)
         except AdStateError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
