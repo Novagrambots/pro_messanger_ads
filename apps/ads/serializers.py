@@ -228,7 +228,8 @@ class AdCreateSerializer(serializers.Serializer):
         promoted_peer = None
         if username:
             data['url'] = validators.promoted_url(username)
-            promoted_peer = check('url', lambda: validators.check_promoted_peer(username, batch.resolve))
+            promoted_peer = check('url', lambda: validators.check_promoted_peer(username, batch.resolve,
+                                                                                superadmin=superadmin))
         data['promoted_peer'] = promoted_peer
         if placement == Placement.SEARCH and data['show_channel_picture']:
             errors['show_channel_picture'] = 'В рекламе в поиске фото канала нет'

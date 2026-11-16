@@ -69,15 +69,20 @@ def parse_promoted_url(value):
         raise serializers.ValidationError('Нужна ссылка вида t.me/<username>')
 
 
-def check_promoted_peer(username, resolve_peers):
-    """Продвигать можно канал или бота — проверяем в Telegram. Возвращает TelegramPeer"""
+# Что можно продвигать: канал или бота; суперадмину — ещё и аккаунт пользователя (свои кампании, напр. «напиши админу»)
+PROMOTABLE = (PeerType.CHANNEL, PeerType.BOT)
+SUPERADMIN_PROMOTABLE = (*PROMOTABLE, PeerType.USER)
+
+
+def check_promoted_peer(username, resolve_peers, superadmin=False):
+    """Продвигать можно канал или бота (суперадмину — и пользователя) — проверяем в Telegram. Возвращает TelegramPeer"""
     try:
         peer = resolve_peers([username])[username]
     except TelegramUnavailable:
         raise serializers.ValidationError(ERR_TELEGRAM_DOWN)
     if peer.not_found:
         raise serializers.ValidationError(f'@{username} не найден в Telegram')
-    if peer.peer_type not in (PeerType.CHANNEL, PeerType.BOT):
+    if peer.peer_type not in (SUPERADMIN_PROMOTABLE if superadmin else PROMOTABLE):
         raise serializers.ValidationError(f'@{username} — не канал и не бот')
     return peer
 

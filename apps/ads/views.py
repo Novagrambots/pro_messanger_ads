@@ -66,6 +66,7 @@ ORDERING = {
     'clicks': F('clicks_total'),
     'actions': F('actions_total'),
     'action_type': Case(When(promoted_peer__peer_type='BOT', then=Value('START')),
+                        When(promoted_peer__peer_type='USER', then=Value('MESSAGE')),
                         When(promoted_peer__isnull=True, url__iendswith='bot', then=Value('START')),
                         default=Value('JOIN')),
     'ctr': Cast('clicks_total', FloatField()) / NullIf(ALL_VIEWS, 0),

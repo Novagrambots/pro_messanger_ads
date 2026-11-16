@@ -161,7 +161,7 @@ def make_entry(ad, world=None):
         'text': ad.text,
         'url': ad.url,
         'promoted': promoted,
-        'button_type': promoted['type'],  # CHANNEL / BOT — текст кнопки переводит клиент
+        'button_type': promoted['type'],  # CHANNEL / BOT / USER (USER — только у суперадмина); текст переводит клиент
         'media': _media(ad),
         'other_info': ad.other_info,
         'label': 'Ad',

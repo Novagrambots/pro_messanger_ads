@@ -53,11 +53,12 @@ AD = {
                 'title': {'type': 'string'},
                 'avatar_url': {'type': 'string', 'nullable': True},
                 'telegram_id': {'type': 'integer', 'format': 'int64', 'nullable': True},
-                'type': {'type': 'string', 'enum': ['CHANNEL', 'BOT']},
+                'type': {'type': 'string', 'enum': ['CHANNEL', 'BOT', 'USER']},
             },
         },
-        'button_type': {'type': 'string', 'enum': ['CHANNEL', 'BOT'],
-                        'description': 'Текст кнопки переводит клиент'},
+        'button_type': {'type': 'string', 'enum': ['CHANNEL', 'BOT', 'USER'],
+                        'description': 'Текст кнопки переводит клиент. USER — аккаунт пользователя (написать ему), '
+                                       'бывает только у объявлений суперадмина'},
         'media': {
             'type': 'object', 'nullable': True,
             'properties': {
