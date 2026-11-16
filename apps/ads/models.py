@@ -160,7 +160,8 @@ class AdPricing(models.Model):
         """
         CPM объявления после смены креатива (как в Telegram Ads): наценка выросла — CPM вырос, упала — вернулся.
         cpm × (100 + новая) / (100 + старая): вверх до сума при росте, вниз при падении — тогда
-        «добавили фото → убрали» возвращает ровно исходный CPM. Не ниже минимума нового креатива.
+        «добавили фото → убрали» возвращает ровно исходный CPM. Не ниже минимума нового креатива
+        (у суперадмина минимума нет, как при создании, — только не ниже 1 сума).
         Наценка не изменилась — CPM тот же (даже если цены с тех пор поднялись)
         """
         old = self.markup_percent_for(ad.placement, ad.targeting, ad.show_channel_picture, ad.media)
@@ -169,6 +170,8 @@ class AdPricing(models.Model):
             return ad.cpm
         exact = Decimal(ad.cpm) * (100 + new) / (100 + old)
         cpm = math.ceil(exact) if new > old else math.floor(exact)
+        if ad.user.is_superuser:
+            return max(cpm, 1)
         return max(cpm, self.min_cpm_for(ad.placement, ad.targeting, show_channel_picture, media))
 
 
