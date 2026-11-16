@@ -145,6 +145,15 @@ class LegacySearchTests(LegacyMixin, ServingBase):
         self.flush()
         self.assertEqual(self.fresh(ad).clicks_total, 1)
 
+    def test_click_with_padded_ids(self):
+        """Выдача обрезает пробелы в viewer_id — клик тоже, иначе зрители выдачи и клика разойдутся"""
+        ad = self.active_ad()
+        self.reload()
+        self.assertEqual(self.old_search(' 1 ').status_code, 200)
+        self.assertEqual(self.old_click(f' {ad.pk} ', ' 1 ').status_code, 200)
+        self.flush()
+        self.assertEqual(self.fresh(ad).clicks_total, 1)
+
     def test_legacy_order_click_still_works(self):
         order = self.search_order(spm='5.00')
         self.reload()

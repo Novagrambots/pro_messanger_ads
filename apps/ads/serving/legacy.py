@@ -248,6 +248,9 @@ def click(request, data):
     order_id, viewer_id = data.get('order_id'), data.get('viewer_id')
     if not isinstance(order_id, str) or not isinstance(viewer_id, (str, int)) or isinstance(viewer_id, bool):
         return False
+    # Пробелы по краям — как в старых вьюхах выдачи (strip / CharField), иначе viewer_key выдачи и клика разойдутся
+    order_id = order_id.strip()
+    viewer_id = viewer_id.strip() if isinstance(viewer_id, str) else viewer_id
     try:
         ad_id = str(uuid.UUID(order_id))
     except ValueError:
