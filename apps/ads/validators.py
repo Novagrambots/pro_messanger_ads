@@ -29,6 +29,9 @@ POLITICS = ('only', 'exclude')  # показывать только в кана�
 MAX_CHANNELS = 100  # в каждом поле со списком каналов
 MAX_BOTS = 100
 MAX_QUERIES = 10
+# Суперадмин (свои кампании, перенос старых заказов поиска с их тегами) — без лимита Telegram в 10 фраз.
+# Потолок — только чтобы один запрос не раздувался
+SUPERADMIN_MAX_QUERIES = 1000
 MAX_DATE_AHEAD = timedelta(days=365)
 FULL_DAY_MASK = (1 << 24) - 1  # все 24 часа суток
 
@@ -200,15 +203,15 @@ def _bots(value):
     return names
 
 
-def _queries(value):
+def _queries(value, max_items=MAX_QUERIES):
     queries = []
-    for item in _as_list(value, MAX_QUERIES, 'фраз'):
+    for item in _as_list(value, max_items, 'фраз'):
         if not isinstance(item, str) or not 4 <= len(item.strip()) <= 32:
             raise serializers.ValidationError('Каждая фраза — от 4 до 32 символов')
         queries.append(item.strip())
     queries = _unique(queries, key=str.lower)
     if not queries:
-        raise serializers.ValidationError('Нужна хотя бы одна поисковая фраза (до 10)')
+        raise serializers.ValidationError(f'Нужна хотя бы одна поисковая фраза (до {max_items})')
     return queries
 
 
@@ -293,18 +296,21 @@ CHANNEL_FIELDS = ('channels', 'exclude_channels', 'channel_audiences', 'exclude_
 BOT_FIELDS = ('bots',)
 
 
-def validate_targeting(placement, data, promoted_peer, resolve_peers):
+def validate_targeting(placement, data, promoted_peer, resolve_peers, superadmin=False):
     """
     Строгая проверка таргетинга по месту показа: формат и лимиты → справочники → каналы
     и боты через Telegram (resolve_peers(имена) → {имя: TelegramPeer}) → правила места показа.
     Возвращает нормализованный словарь (все поля места показа на месте). Ошибки — по полям.
+    superadmin — фраз поиска можно больше 10 (до SUPERADMIN_MAX_QUERIES); остальные правила те же
     """
     if data is None:
         data = {}
     if not isinstance(data, dict):
         raise serializers.ValidationError('Таргетинг — объект')
 
-    fields = TARGETING_FIELDS[placement]
+    fields = dict(TARGETING_FIELDS[placement])
+    if superadmin and 'queries' in fields:
+        fields['queries'] = lambda value: _queries(value, SUPERADMIN_MAX_QUERIES)
     unknown = set(data) - set(fields)
     if unknown:
         raise serializers.ValidationError(

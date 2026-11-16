@@ -18,3 +18,9 @@ class AdsConfig(AppConfig):
         post_save.connect(ad_saved, sender=ChannelEarning, dispatch_uid='ads_serving_snapshot_version_channels')
         # Тайминги баннера в видео живут в «Ценах и правилах»
         post_save.connect(ad_saved, sender=AdPricing, dispatch_uid='ads_serving_snapshot_version_pricing')
+        # Мост старых версий: в снимке — индекс живых старых заказов (одобрили, отменили — перечитать сразу)
+        from apps.ads.serving.legacy import order_saved
+        from apps.chat_ads.models import ChatAdOrder
+        from apps.search_ads.models import Order
+        post_save.connect(order_saved, sender=Order, dispatch_uid='ads_serving_snapshot_version_legacy_search')
+        post_save.connect(order_saved, sender=ChatAdOrder, dispatch_uid='ads_serving_snapshot_version_legacy_chat')

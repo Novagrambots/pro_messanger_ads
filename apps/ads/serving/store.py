@@ -60,6 +60,14 @@ def click_key(ad_id, viewer):
     return f'{PREFIX}k:{ad_id}:{viewer}'
 
 
+def legacy_key(viewer, ad_id):
+    """
+    random_id последней выдачи объявления зрителю через старый URL (мост старых версий):
+    старый клиент присылает клик как order_id + viewer_id, без токена. Живёт столько же, сколько токен
+    """
+    return f'{PREFIX}lg:{viewer}:{ad_id}'
+
+
 def delta_key(ad_id):
     """
     Несброшенные дельты: поля «<день>:v|fv|c|a|o|s» (показы, бесплатные показы, клики, действия,

@@ -187,12 +187,14 @@ def _by_price(entries):
 
 
 class Snapshot:
-    def __init__(self, ads, version, channels=None, world=None):
+    def __init__(self, ads, version, channels=None, world=None, legacy=None):
         self.version = version
         self.loaded_at = time.monotonic()
         self.ads = {}
         self.channels = channels or {}  # channel_id → ChannelMeta
         self.world = world or World()
+        # Мост старых версий: где ещё крутятся старые заказы (legacy.LegacyIndex); None — не знаем, ищем в Postgres
+        self.legacy = legacy
         search, bots, any_bot, channel_ads, lang_ads, users = {}, {}, [], {}, {}, {}
         for ad in ads:
             entry = make_entry(ad, self.world)
@@ -271,7 +273,12 @@ def load():
         pairs += [str(ad.pk), S.to_thousandths(ad.remaining_budget())]
     for start in range(0, len(pairs), _SETNX_CHUNK):
         s.setnx_budgets(args=[S.PREFIX, *pairs[start:start + _SETNX_CHUNK]])
-    return Snapshot(ads, version, load_channels(), load_world())
+    legacy_index = None
+    # Старые URL отдаёт web; сервису serving (только /api/ads/serve|events|report/) индекс не нужен
+    if settings.ADS_LEGACY_BRIDGE and not settings.SERVING_ONLY:
+        from .legacy import load_index  # внутри: legacy сам импортирует этот модуль
+        legacy_index = load_index()
+    return Snapshot(ads, version, load_channels(), load_world(), legacy_index)
 
 
 _current = None
