@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from django.db import transaction
 from rest_framework.views import APIView
 
+from apps.ads.serving import legacy
 from apps.common.models import ModerationStatus
 from apps.common.pagination import StandardResultsSetPagination
 from apps.common.permissions import HasServerApiKey
@@ -206,11 +207,15 @@ class GetChatAdView(APIView):
     (channel_id — числовой id канала-площадки; без него заработок площадке не начислится).
     Успешный ответ — это засчитанный показ: у заказа атомарно списывается один показ.
     404 — штатный исход «подходящей рекламы нет».
+    Мост старых версий (apps/ads/serving/legacy.py): по channel_id в формате -100… в том же аукционе
+    крутятся объявления v2 «сообщение в канале» и «Пользователи» (order_id — id объявления);
+    лимиты запросов — как у выдачи v2.
     Доступ — только по заголовку X-API-Key (server-to-server от NovaGram).
     """
     serializer_class = AdRequestSerializer
     permission_classes = [HasServerApiKey]  # только запросы с сервера NovaGram (по API-ключу)
-    throttle_classes = []  # доверенный сервер (server-to-server), глобальный троттл 500/min тут не нужен
+    # Глобальный троттл DRF не нужен: лимиты на зрителя и IP (как у выдачи v2) ставит мост в Redis
+    throttle_classes = []
 
     @extend_schema(request=AdRequestSerializer, auth=SERVER_API_KEY_AUTH, responses={
         200: ChatAdSearchSerializer,
@@ -225,12 +230,35 @@ class GetChatAdView(APIView):
         viewer_id = input_serializer.validated_data['viewer_id']
         channel_id = input_serializer.validated_data.get('channel_id')
 
-        # 2. Поиск кандидатов (Грубая фильтрация)
-        # Ищем все активные заказы, где канал упоминается в channels
-        # ИЛИ channels пуст (без таргетинга — показ во всех каналах).
-        # Сортируем по SPM (сначала самые дорогие)
-        candidates = ChatAdOrder.objects.filter(
-            # icontains может найти "news" внутри "news_sport" — точная проверка ниже
+        # 2. Лимиты запросов и лучшее объявление v2 (без Postgres). Лимит превышен — «рекламы нет»
+        offer = legacy.offer_chat(request, channel_id, viewer_id)
+        if offer is legacy.LIMITED:
+            return self._not_found()
+
+        # 3. Старые заказы — из Postgres, только если для этого канала они есть (индекс в снимке выдачи).
+        #    Общий аукцион: старые заказы и объявление v2 — по цене за 1000 показов
+        candidates = self._candidates(channel_name) if legacy.may_have_chat_orders(offer, channel_name) else ()
+        data, shown = legacy.run(request, offer, candidates,
+                                 lambda order: self._show_order(request, order, channel_name, channel_id, viewer_id))
+        if shown is not None:
+            data = legacy.chat_result(request, shown)
+        if data is None:
+            return self._not_found()
+        return Response(data, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _not_found():
+        return Response({"message": "Нет доступной рекламы для этого канала или пользователя"},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    @staticmethod
+    def _candidates(channel_name):
+        """
+        Грубая фильтрация: активные заказы, где канал упоминается в channels
+        ИЛИ channels пуст (без таргетинга — показ во всех каналах). Сначала самые дорогие
+        """
+        return ChatAdOrder.objects.filter(
+            # icontains может найти "news" внутри "news_sport" — точная проверка в _show_order
             Q(channels='') | Q(channels__icontains=channel_name),
             status=ModerationStatus.APPROVED,  # показываем только прошедшее модерацию
             is_active=True,
@@ -239,72 +267,66 @@ class GetChatAdView(APIView):
             remaining_views__gt=0
         ).order_by('-spm')
 
-        # 3. Перебор кандидатов (Ротация)
-        for order in candidates:
-            # 3.1 Точная проверка канала (так как в БД строка через запятую)
-            if not order.is_channel_in_list(channel_name):
-                continue
+    @staticmethod
+    def _show_order(request, order, channel_name, channel_id, viewer_id):
+        """Показать старый заказ: данные ответа или None (не тот канал, лимит, показы кончились)"""
+        # 1. Точная проверка канала (так как в БД строка через запятую)
+        if not order.is_channel_in_list(channel_name):
+            return None
 
-            # 3.2 Проверка лимитов на пользователя (Frequency Capping)
+        # 2. Проверка лимитов на пользователя (Frequency Capping)
+        if order.max_views_per_user != -1:
+            # Если лимит есть, проверяем, сколько раз юзер уже видел эту рекламу
+            # Используем .only('view_count') для оптимизации запроса
+            view_entry = ChatAdView.objects.filter(
+                order=order,
+                viewer_id=viewer_id
+            ).only('view_count').first()
+
+            if view_entry and view_entry.view_count >= order.max_views_per_user:
+                # Юзер уже насмотрел лимит -> пропускаем этот заказ, идем к следующему (дешевле)
+                return None
+
+            if order.max_views_per_user == 0:
+                return None
+
+        # 3. Списание показа — атомарным условным UPDATE, без блокирующего
+        # select_for_update. WHERE-условие само отсекает гонку: одновременно
+        # пройдёт ровно один запрос, лишние получат 0 обновлённых строк.
+        with transaction.atomic():
+            updated = ChatAdOrder.objects.filter(
+                pk=order.pk, remaining_views__gt=0,
+                status=ModerationStatus.APPROVED,
+                is_active=True, cancelled=False
+            ).update(
+                remaining_views=F('remaining_views') - 1,
+                shown_views=F('shown_views') + 1,
+            )
+            if not updated:
+                return None  # показы кончились или кто-то успел раньше — к следующему заказу
+
+            # Показы исчерпаны -> помечаем заказ завершённым (точечный дешёвый апдейт).
+            ChatAdOrder.objects.filter(pk=order.pk, remaining_views=0).update(
+                completed=True, is_active=False
+            )
+
+            # Начисляем заработок каналу-площадке за этот показ. Строка заказа залочена
+            # этим UPDATE до commit, поэтому параллельные показы ЭТОГО же заказа
+            # сериализуются — счётчик показов юзера ниже безопасен.
+            ChannelEarning.accrue(channel_id, order, channel_name=channel_name)
+
+            # История показов на пользователя — только при заданном лимите (иначе -1: не пишем).
             if order.max_views_per_user != -1:
-                # Если лимит есть, проверяем, сколько раз юзер уже видел эту рекламу
-                # Используем .only('view_count') для оптимизации запроса
-                view_entry = ChatAdView.objects.filter(
-                    order=order,
-                    viewer_id=viewer_id
-                ).only('view_count').first()
-
-                if view_entry and view_entry.view_count >= order.max_views_per_user:
-                    # Юзер уже насмотрел лимит -> пропускаем этот заказ, идем к следующему (дешевле)
-                    continue
-
-                if order.max_views_per_user == 0:
-                    continue
-
-            # 3.3 Списание показа — атомарным условным UPDATE, без блокирующего
-            # select_for_update. WHERE-условие само отсекает гонку: одновременно
-            # пройдёт ровно один запрос, лишние получат 0 обновлённых строк.
-            with transaction.atomic():
-                updated = ChatAdOrder.objects.filter(
-                    pk=order.pk, remaining_views__gt=0,
-                    status=ModerationStatus.APPROVED,
-                    is_active=True, cancelled=False
-                ).update(
-                    remaining_views=F('remaining_views') - 1,
-                    shown_views=F('shown_views') + 1,
+                view_obj, _ = ChatAdView.objects.get_or_create(
+                    order=order, viewer_id=viewer_id
                 )
-                if not updated:
-                    continue  # показы кончились или кто-то успел раньше — к следующему заказу
+                view_obj.increment_view()
 
-                # Показы исчерпаны -> помечаем заказ завершённым (точечный дешёвый апдейт).
-                ChatAdOrder.objects.filter(pk=order.pk, remaining_views=0).update(
-                    completed=True, is_active=False
-                )
-
-                # Начисляем заработок каналу-площадке за этот показ. Строка заказа залочена
-                # этим UPDATE до commit, поэтому параллельные показы ЭТОГО же заказа
-                # сериализуются — счётчик показов юзера ниже безопасен.
-                ChannelEarning.accrue(channel_id, order, channel_name=channel_name)
-
-                # История показов на пользователя — только при заданном лимите (иначе -1: не пишем).
-                if order.max_views_per_user != -1:
-                    view_obj, _ = ChatAdView.objects.get_or_create(
-                        order=order, viewer_id=viewer_id
-                    )
-                    view_obj.increment_view()
-
-                # Отдаём рекламу. В БД показ уже списан; счётчики в объекте правим в памяти.
-                order.remaining_views -= 1
-                order.shown_views += 1
-                # context с request нужен, чтобы media_url был абсолютным
-                return Response(ChatAdSearchSerializer(order, context={'request': request}).data,
-                                status=status.HTTP_200_OK)
-
-        # Если цикл прошел и ничего не вернул
-        return Response(
-            {"message": "Нет доступной рекламы для этого канала или пользователя"},
-            status=status.HTTP_404_NOT_FOUND
-        )
+            # Отдаём рекламу. В БД показ уже списан; счётчики в объекте правим в памяти.
+            order.remaining_views -= 1
+            order.shown_views += 1
+            # context с request нужен, чтобы media_url был абсолютным
+            return ChatAdSearchSerializer(order, context={'request': request}).data
 
 
 class ChatAdClickView(APIView):
@@ -325,6 +347,10 @@ class ChatAdClickView(APIView):
         },
     })
     def post(self, request):
+        # 0. Мост старых версий: клик по объявлению v2, выданному этому зрителю через старую выдачу в чатах
+        if legacy.click(request, request.data):
+            return self._clicked()
+
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -338,9 +364,11 @@ class ChatAdClickView(APIView):
         # 3. Сохраняем ТОЛЬКО поле clicks, не трогая остальные
         order.updated_at = timezone.now()
         order.save(update_fields=['clicks', 'updated_at'])
+        return self._clicked()
 
+    @staticmethod
+    def _clicked():
         response_data = {'message': 'Пользователь перешел по рекламе. (Кликнул по рекламе)'}
         response_serializer = ChatAdResponsesMessageSerializer(data=response_data)
         response_serializer.is_valid(raise_exception=True)
-
         return Response(response_serializer.data, status=status.HTTP_200_OK)

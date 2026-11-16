@@ -24,8 +24,8 @@ MAX_EVENTS = 50
 PARTNER_PLACEMENTS = (Placement.CHANNEL_MESSAGE, Placement.USERS_CHANNEL_MESSAGE)
 
 
-def _prepare(store, event, viewer, snapshot, day, now):
-    """Lua-вызов для события или None, если событие отклоняется без Redis"""
+def prepare(store, event, viewer, snapshot, day, now):
+    """Lua-вызов для события или None, если событие отклоняется без Redis (его же берёт мост старых версий)"""
     if not isinstance(event, dict):
         return None
     token = tokens.decode(event.get('random_id'), now)
@@ -74,7 +74,7 @@ def process(snapshot, viewer, events, now=None):
     pipe = store.redis.pipeline(transaction=False)
     queued = rejected = 0
     for event in events:
-        call = _prepare(store, event, viewer, snapshot, day, ts)
+        call = prepare(store, event, viewer, snapshot, day, ts)
         if call is None:
             rejected += 1
             continue

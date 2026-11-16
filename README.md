@@ -25,6 +25,11 @@ celery -A core beat -l info
 python manage.py update_geoip
 ```
 
+Старые версии приложения ходят в старые URL выдачи (`/api/search_ads/order/search/`, `/api/chat_ads/order/search/`,
+`…/order/click/`). Мост `apps/ads/serving/legacy.py` показывает там и объявления v2 — с общими бюджетом, частотой
+показов и статистикой (тег = фраза поиска, `channel_id` = канал; объявления v2 — только числовому `viewer_id`).
+Выключатель — `ADS_LEGACY_BRIDGE=False`: старые URL снова отдают только старые заказы.
+
 За Cloudflare задайте в `.env` `CLIENT_IP_HEADER=CF-Connecting-IP` — иначе IP берётся из первого адреса
 `X-Forwarded-For`, а его клиент может подделать.
 

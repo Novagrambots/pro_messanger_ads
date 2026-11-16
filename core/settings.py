@@ -380,3 +380,6 @@ CLIENT_IP_HEADER = os.getenv('CLIENT_IP_HEADER', '')
 GEOIP_PATH = os.getenv('GEOIP_PATH') or str(BASE_DIR / 'data' / 'dbip-city-lite.mmdb')
 # Фоновый поток, который держит снимок объявлений свежим (в тестах выключен — снимок грузят явно)
 ADS_SNAPSHOT_THREAD = not TESTING and os.getenv('ADS_SNAPSHOT_THREAD', 'True') == 'True'
+# Мост старых версий приложения (apps/ads/serving/legacy.py): старые URL выдачи (поиск, чаты, клики)
+# показывают и объявления v2 — общие бюджет, частота и статистика. False — старые URL как раньше
+ADS_LEGACY_BRIDGE = os.getenv('ADS_LEGACY_BRIDGE', 'True') == 'True'
