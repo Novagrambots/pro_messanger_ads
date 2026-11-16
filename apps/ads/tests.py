@@ -361,6 +361,14 @@ class SuperadminLimitsTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data['cpm'][0], "CPM can't be less than 1000")
 
+    def test_reprice_keeps_superadmin_cheap_cpm(self):
+        """Смена наценки креатива: CPM суперадмина растёт по наценке, но до минимума не поднимается"""
+        boss_ad = create_ad(self.boss_client, Placement.BOT, cpm=1).data['id']
+        response = self.boss_client.patch(f'/api/ads/{boss_ad}/', {'show_channel_picture': True}, format='json')
+        self.assertEqual((response.status_code, response.data['cpm']), (200, 2))  # 1 × 1,3 → вверх до 2
+        response = self.boss_client.patch(f'/api/ads/{boss_ad}/', {'show_channel_picture': False}, format='json')
+        self.assertEqual(response.data['cpm'], 1)  # 2 / 1,3 → вниз до 1
+
 
 @override_settings(**ADGRAM_SETTINGS)
 @patch('apps.notifications.services._enqueue_push')

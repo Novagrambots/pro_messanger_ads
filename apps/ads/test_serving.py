@@ -898,10 +898,12 @@ class ReportTests(ServingBase):
         report = AdReport.objects.get()
         self.assertEqual(self.owner_client.get('/api/moderation/ads/reports/').status_code, 403)
         self.assertEqual(self.owner_client.post(f'/api/moderation/ads/reports/{report.pk}/review/').status_code, 403)
-        # Жалобы на своё объявление модератор не разбирает
+        # Жалобу на своё объявление модератор разбирает сам
         own = AdReport.objects.create(ad=self.ad, viewer_key='0' * 32, reason='spam')
         Ad.objects.filter(pk=self.ad.pk).update(user=self.moderator)
-        self.assertEqual(self.mod_client.post(f'/api/moderation/ads/reports/{own.pk}/review/').status_code, 403)
+        response = self.mod_client.post(f'/api/moderation/ads/reports/{own.pk}/review/')
+        self.assertEqual((response.status_code, response.data['status']), (200, AdReport.Status.REVIEWED))
+        self.assertEqual(AdReport.objects.get(pk=own.pk).reviewed_by, self.moderator)
 
 
 @override_settings(ROOT_URLCONF='core.urls_serving')

@@ -1,4 +1,10 @@
+import importlib
+import os
+from unittest.mock import patch
+
 from django.test import RequestFactory, SimpleTestCase, override_settings
+
+from core import settings as project_settings
 
 from apps.common.permissions import has_server_api_key, server_api_keys
 
@@ -34,3 +40,26 @@ class ServerApiKeysTests(SimpleTestCase):
         self.assertEqual(server_api_keys(), [])
         for key in (None, '', ' ', 'anything'):
             self.assertFalse(self.check(key), key)
+
+
+class CsrfTrustedOriginsExtraTests(SimpleTestCase):
+    """CSRF_TRUSTED_ORIGINS_EXTRA из env дописывается к зашитому списку (стенд на другом домене)"""
+
+    def origins(self, extra=None):
+        env = {} if extra is None else {'CSRF_TRUSTED_ORIGINS_EXTRA': extra}
+        # load_dotenv выключаем: иначе переменная из локального .env подмешалась бы в тест
+        with patch.dict(os.environ, env), patch('dotenv.load_dotenv'):
+            if extra is None:
+                os.environ.pop('CSRF_TRUSTED_ORIGINS_EXTRA', None)
+            return importlib.reload(project_settings).CSRF_TRUSTED_ORIGINS
+
+    def tearDown(self):
+        # Модуль настроек — как при старте (живые django.conf.settings перезагрузка не трогает)
+        importlib.reload(project_settings)
+
+    def test_extra_origins(self):
+        base = self.origins()
+        self.assertIn('https://ads-api.vipads.uz', base)
+        self.assertEqual(self.origins(''), base)
+        self.assertEqual(self.origins(' https://novadev.vipads.uz , ,https://b.test'),
+                         [*base, 'https://novadev.vipads.uz', 'https://b.test'])

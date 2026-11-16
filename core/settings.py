@@ -169,6 +169,10 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost",
     "https://nonmutational-hipolito-unravaged.ngrok-free.dev"
 ]
+# Стенд на другом домене (например, https://novadev.vipads.uz): свои адреса через запятую,
+# со схемой — Django сверяет origin целиком. Без переменной список как выше
+CSRF_TRUSTED_ORIGINS += [origin.strip() for origin in os.getenv('CSRF_TRUSTED_ORIGINS_EXTRA', '').split(',')
+                         if origin.strip()]
 
 # TLS терминируется на системном nginx хоста, до Django запрос доходит по http.
 # Этот заголовок (его пробрасывают nginx-ы) говорит Django, что оригинальный запрос был https.
@@ -240,6 +244,18 @@ ADGRAM_JWT_SECRET = os.getenv('ADGRAM_JWT_SECRET', '')
 
 # manage.py test: тесты не должны зависеть от .env (Redis кэша, токен бота и т.п.)
 TESTING = sys.argv[1:2] == ['test']
+
+# Логи наших приложений (logger apps.*) в консоль, с INFO (например, время этапов «похожих»).
+# Логгеры django / celery / gunicorn не трогаем. propagate=False — иначе в воркере Celery
+# (он вешает свой обработчик на корневой логгер) каждая строка печаталась бы дважды.
+# В тестах — только WARNING, как было (assertLogs уровень ставит сам)
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {'plain': {'format': '%(asctime)s %(levelname)s %(name)s: %(message)s'}},
+    'handlers': {'console': {'class': 'logging.StreamHandler', 'formatter': 'plain'}},
+    'loggers': {'apps': {'handlers': ['console'], 'level': 'WARNING' if TESTING else 'INFO', 'propagate': False}},
+}
 
 # Общий кэш Django (справочники, троттлинг): в docker — Redis, база 1 (база 0 занята Celery).
 # Без переменной — память процесса (локально и всегда в тестах). Нужен общий: правка справочника

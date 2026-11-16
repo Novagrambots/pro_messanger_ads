@@ -4,6 +4,7 @@
 """
 import shutil
 import tempfile
+import threading
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -16,7 +17,7 @@ from rest_framework.test import APIClient
 
 from apps.ads.models import Ad, Placement
 from apps.ads.tests import KUNUZ_ID, SPORTS, client_for, create_ad, ensure_test_peers, make_local_user
-from apps.ads.validators import ERR_TELEGRAM_DOWN, ERR_TOO_MANY_UNKNOWN
+from apps.ads.validators import ERR_TELEGRAM_DOWN, not_checked_in_time_error
 from apps.directories import telegram
 from apps.directories.models import Country, Language, Location, TelegramPeer, Topic
 
@@ -102,6 +103,39 @@ class FakeTelegram:
 
 def fake(routes):
     return patch('apps.directories.telegram.requests.get', side_effect=FakeTelegram(routes))
+
+
+class SlowTelegram:
+    """
+    requests.get для проверки параллельности: любое t.me/<имя> — страница канала, остальное — JPEG,
+    каждый ответ — через delay с. Имена и URL из hang ждут release (не успевают в deadline).
+    Считает, сколько запросов шло одновременно (max_active)
+    """
+
+    def __init__(self, delay=0.2, hang=()):
+        self.delay, self.hang = delay, set(hang)
+        self.release = threading.Event()
+        self.lock = threading.Lock()
+        self.active = self.max_active = 0
+        self.urls = []
+
+    def __call__(self, url, **kwargs):
+        with self.lock:
+            self.urls.append(url)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            name = url.removeprefix('https://t.me/')
+            self.release.wait(5 if name in self.hang or url in self.hang else self.delay)
+            if url.startswith('https://t.me/'):
+                return FakeResponse(CHANNEL_PAGE.replace('@kunuz', f'@{name}'))
+            return FakeResponse(JPEG)
+        finally:
+            with self.lock:
+                self.active -= 1
+
+    def fetched(self):
+        return sorted(url.removeprefix('https://t.me/') for url in self.urls if url.startswith('https://t.me/'))
 
 
 class TempMediaMixin:
@@ -391,10 +425,83 @@ class TargetingWithDirectoriesTests(TempMediaMixin, TestCase):
             errors = self.invalid(Placement.CHANNEL_MESSAGE, {'channels': ['slownews']})
         self.assertIn(ERR_TELEGRAM_DOWN, str(errors))
 
-    def test_more_than_20_unknown_names(self):
-        names = [f'unknownchan{i}' for i in range(21)]
-        errors = self.invalid(Placement.CHANNEL_MESSAGE, {'channels': names})  # в сеть даже не ходим
-        self.assertIn(ERR_TOO_MANY_UNKNOWN, str(errors))
+    def stale_peer(self, username, peer_type=PeerType.CHANNEL, telegram_id=None, not_found=False):
+        return TelegramPeer.objects.create(username=username, peer_type=peer_type, telegram_id=telegram_id,
+                                           not_found=not_found,
+                                           fetched_at=timezone.now() - TelegramPeer.FRESH_FOR - timedelta(hours=1))
+
+    def slow(self, tg):
+        self.addCleanup(tg.release.set)  # отпускаем «зависшие» потоки после теста
+        return patch('apps.directories.telegram.requests.get', side_effect=tg)
+
+    def test_many_new_channels_checked_in_parallel(self):
+        # 40 каналов из «похожих» (протухшие, без id) — лимита больше нет, проверяем разом
+        names = [f'similarchan{i}' for i in range(40)]
+        for name in names:
+            self.stale_peer(name)
+        tg = SlowTelegram(delay=0.1)
+        with self.slow(tg):
+            response = create_ad(self.client, Placement.CHANNEL_MESSAGE, targeting={'channels': names})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(tg.fetched(), sorted(names))
+        self.assertEqual(tg.max_active, telegram.WORKERS)  # по 8 одновременно, а не по одному
+        self.assertTrue(all(peer.is_fresh() for peer in TelegramPeer.objects.filter(username__in=names)))
+
+    def test_checked_stale_peers_taken_as_is(self):
+        # Протухшие, но уже проверенные: каналы с числовым id и бот — без похода в Telegram (сеть запрещена)
+        names = [f'oldchan{i}' for i in range(30)]
+        for i, name in enumerate(names):
+            self.stale_peer(name, telegram_id=-1002000000000 - i)
+        self.stale_peer('oldbot', PeerType.BOT)
+        response = create_ad(self.client, Placement.CHANNEL_MESSAGE, url='t.me/oldchan0',
+                             targeting={'channels': names[1:]})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['targeting']['channels'][0], {'username': 'oldchan1', 'id': -1002000000001})
+        self.assertEqual(response.data['targeting']['exclude_channels'],
+                         [{'username': 'oldchan0', 'id': -1002000000000}])  # себя исключили по старому id
+        response = create_ad(self.client, Placement.BOT, targeting={'bots': ['oldbot']})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertFalse(TelegramPeer.objects.get(username='oldbot').is_fresh())  # не трогали
+
+    def test_stale_group_user_not_found_and_channel_without_id_rechecked(self):
+        self.stale_peer('uzchat', PeerType.GROUP)
+        self.stale_peer('someone', PeerType.USER)
+        self.stale_peer('gone', PeerType.UNKNOWN, not_found=True)
+        self.stale_peer('fromsimilar')
+        names = ['uzchat', 'someone', 'gone', 'fromsimilar']
+        tg = SlowTelegram(delay=0)  # теперь все четверо — каналы
+        with self.slow(tg):
+            response = create_ad(self.client, Placement.CHANNEL_MESSAGE, targeting={'channels': names})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(tg.fetched(), sorted(names))
+        self.assertEqual(set(TelegramPeer.objects.filter(username__in=names).values_list('peer_type', flat=True)),
+                         {PeerType.CHANNEL})
+
+    def test_not_checked_in_time(self):
+        fast, slow = [f'fastchan{i}' for i in range(5)], ['slowchan0', 'slowchan1', 'slowchan2']
+        tg = SlowTelegram(delay=0, hang=slow)
+        with self.slow(tg), patch('apps.ads.serializers.PeerBatch', lambda: telegram.PeerBatch(1)):
+            response = create_ad(self.client, Placement.CHANNEL_MESSAGE, targeting={'channels': fast + slow})
+        self.assertEqual(response.status_code, 400, response.data)
+        # Общая ошибка таргетинга (не поля channels): фронт показывает её под блоком таргетинга
+        self.assertEqual(response.data['targeting'], [not_checked_in_time_error(3)])
+        self.assertEqual(response.data['targeting'][0],
+                         'Не успели проверить в Telegram 3 канала — нажмите «Сохранить» ещё раз')
+        self.assertTrue(all(peer.is_fresh() for peer in TelegramPeer.objects.filter(username__in=fast)))
+        self.assertFalse(TelegramPeer.objects.filter(username__in=slow).exists())
+
+        # Со второй попытки проверяем только тех, кого не успели
+        tg.release.set()
+        again = SlowTelegram(delay=0)
+        with self.slow(again):
+            response = create_ad(self.client, Placement.CHANNEL_MESSAGE, targeting={'channels': fast + slow})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(again.fetched(), slow)
+
+    def test_not_checked_in_time_error_text(self):
+        for count, word in ((1, 'канал'), (2, 'канала'), (4, 'канала'), (5, 'каналов'), (11, 'каналов'),
+                            (14, 'каналов'), (21, 'канал'), (22, 'канала'), (100, 'каналов')):
+            self.assertIn(f' {count} {word} —', not_checked_in_time_error(count))
 
 
 TARGETING_BOT = {'bots': ['t.me/weatherbot']}
