@@ -101,6 +101,8 @@ class MoneyOperation(models.Model):
         LEGACY_FIX = 'LEGACY_FIX', 'Возврат старых потерь'
         TOP_UP = 'TOP_UP', 'Пополнение бюджета объявления'
         DELETE = 'DELETE', 'Объявление удалено'
+        # Остаток старого заказа переехал в объявление v2 — кошелёк не двигается (wallet_amount = 0)
+        MIGRATE = 'MIGRATE', 'Перенос старого заказа в v2'
 
     class Wallet(models.TextChoices):
         ADGRAM = 'ADGRAM', 'AdGram'
