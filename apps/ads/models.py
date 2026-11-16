@@ -287,6 +287,11 @@ class Ad(models.Model):
                                      blank=True, related_name='+', verbose_name='Кто модерировал')
     moderated_at = models.DateTimeField('Когда модерировали', null=True, blank=True)
 
+    # Перенесено из старого заказа (manage.py migrate_legacy_search): его тип и id. Один заказ — одно объявление;
+    # по этому полю отчёты отличают перенесённые старые заказы от живых (иначе показы и деньги посчитаются дважды)
+    legacy_order_type = models.CharField('Тип старого заказа', max_length=20, blank=True, default='', editable=False)
+    legacy_order_id = models.UUIDField('Старый заказ', null=True, blank=True, unique=True, editable=False)
+
     created_at = models.DateTimeField('Создано', auto_now_add=True)
     updated_at = models.DateTimeField('Изменено', auto_now=True)
 
