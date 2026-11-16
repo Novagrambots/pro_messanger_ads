@@ -34,6 +34,28 @@ DEBUG = os.getenv('DEBUG', 'False') == 'True'
 # ALLOWED_HOSTS = []
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '').split(',')
 
+# Логи — в stderr процесса, в docker их видно через docker logs. Без этого блока при DEBUG=False
+# Django не печатает трейсбеки 500-х (шлёт только письмо ADMINS, а их нет), а info наших модулей теряется.
+# django.request — только ERROR (500 с трейсбеком): 4xx (401, 404, 429 выдачи) под нагрузкой завалят лог.
+# В Celery корневой логгер после этого перенастраивает сам воркер — там уровень задаёт флаг -l
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'plain': {'format': '%(asctime)s %(levelname)s %(name)s: %(message)s'},
+    },
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler', 'formatter': 'plain'},
+    },
+    'root': {'handlers': ['console'], 'level': LOG_LEVEL},
+    'loggers': {
+        # handlers=[] убирает console/mail_admins Django по умолчанию — пишет через корневой, без дублей
+        'django': {'handlers': [], 'level': LOG_LEVEL},
+        'django.request': {'level': 'ERROR'},
+    },
+}
+
 # Application definition
 
 INSTALLED_APPS = [
