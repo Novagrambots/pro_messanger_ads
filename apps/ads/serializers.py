@@ -210,6 +210,8 @@ class AdCreateSerializer(serializers.Serializer):
     def validate(self, data):
         pricing = AdPricing.load()
         placement = data['placement']
+        # Суперадмин (свои кампании, перенос старых заказов): без минимального CPM и лимита в 10 фраз
+        superadmin = self.context['request'].user.is_superuser
         errors = {}
 
         def check(field, func):
@@ -233,16 +235,17 @@ class AdCreateSerializer(serializers.Serializer):
         data['schedule'] = check('schedule', lambda: validators.check_schedule(placement, data['schedule']))
         data['targeting'] = check(
             'targeting', lambda: validators.validate_targeting(placement, data['targeting'], promoted_peer,
-                                                               batch.resolve))
+                                                               batch.resolve, superadmin=superadmin))
 
         data['media'] = check('media', lambda: resolve_media(
             self.context['request'].user, data['media'], placement))
         if data['media'] and data['show_channel_picture']:
             errors['media'] = ERR_MEDIA_WITH_PICTURE
 
-        # Одна наценка к минимуму: видео / фото (дороже при выборе конкретных каналов) / фото канала
+        # Одна наценка к минимуму: видео / фото (дороже при выборе конкретных каналов) / фото канала.
+        # У суперадмина минимума нет — любой CPM от 1 сума (как spm старых заказов)
         min_cpm = pricing.min_cpm_for(placement, data['targeting'], data['show_channel_picture'], data['media'])
-        if data['cpm'] < min_cpm:
+        if not superadmin and data['cpm'] < min_cpm:
             errors['cpm'] = f"CPM can't be less than {min_cpm}"
         if data['budget'] < pricing.min_budget:
             errors['budget'] = f'Минимальный бюджет — {pricing.min_budget} сум'
@@ -346,8 +349,9 @@ class AdUpdateSerializer(serializers.Serializer):
             raise serializers.ValidationError({'media': ERR_MEDIA_WITH_PICTURE})
 
         # Минимальный CPM зависит от креатива (наценки за медиа и фото канала). Пока правка на проверке,
-        # объявление может получить её в любой момент — поэтому берём более строгий из двух минимумов
-        if {'cpm', 'show_channel_picture', 'media'} & set(data):
+        # объявление может получить её в любой момент — поэтому берём более строгий из двух минимумов.
+        # У суперадмина минимума нет, как и при создании
+        if {'cpm', 'show_channel_picture', 'media'} & set(data) and not self.context['request'].user.is_superuser:
             pricing = AdPricing.load()
             min_cpm = pricing.min_cpm_for(ad.placement, ad.targeting, picture, media)
             if not ad.applies_creative_directly(self.context['request'].user):
