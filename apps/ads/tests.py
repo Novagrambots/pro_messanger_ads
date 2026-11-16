@@ -13,6 +13,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.account.services import create_user_with_balance
+from apps.ads import validators
 from apps.ads.models import Ad, AdPricing, AdStateError, AdStatus, Placement
 from apps.ads.validators import (ERR_CHANNELS_WITH_LANGUAGES, ERR_CHANNELS_WITH_TOPICS,
                                  ERR_TOPICS_WITHOUT_LANGUAGE)
@@ -308,6 +309,57 @@ class AdCreateTests(TestCase):
         response = create_ad(self.client, Placement.USERS_BOT_BANNER,
                              schedule={'enabled': True, 'days': weekdays_9_18, 'timezone': 'viewer'})
         self.assertEqual(response.status_code, 201, response.data)
+
+
+class SuperadminLimitsTests(TestCase):
+    """
+    Суперадмин (свои кампании, перенос старых заказов поиска): без минимального CPM и лимита в 10 фраз.
+    У рекламодателей правила те же
+    """
+
+    def setUp(self):
+        self.boss = make_local_user('boss')
+        self.boss.is_superuser = True
+        self.boss.save(update_fields=['is_superuser'])
+        self.boss_client = client_for(self.boss)
+        self.user_client = client_for(make_local_user('adv'))
+
+    def test_superadmin_any_cpm_and_many_queries(self):
+        queries = [f'фраза {i}' for i in range(50)]
+        response = create_ad(self.boss_client, Placement.SEARCH, cpm=1, targeting={'queries': queries})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual((response.data['cpm'], response.data['status']), (1, AdStatus.ACTIVE))
+        self.assertEqual(response.data['targeting']['queries'], queries)
+        # Наценки за медиа и фото канала — тоже не мешают
+        response = create_ad(self.boss_client, Placement.BOT, cpm=1, show_channel_picture=True)
+        self.assertEqual(response.status_code, 201, response.data)
+
+    def test_superadmin_queries_cap(self):
+        too_many = [f'фраза {i}' for i in range(validators.SUPERADMIN_MAX_QUERIES + 1)]
+        response = create_ad(self.boss_client, Placement.SEARCH, targeting={'queries': too_many})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('targeting', response.data)
+        # Длина фразы — те же 4–32 символа
+        response = create_ad(self.boss_client, Placement.SEARCH, targeting={'queries': ['abc']})
+        self.assertEqual(response.status_code, 400)
+
+    def test_advertiser_limits_unchanged(self):
+        response = create_ad(self.user_client, Placement.SEARCH, cpm=1)
+        self.assertEqual(response.data['cpm'][0], "CPM can't be less than 1000")
+        response = create_ad(self.user_client, Placement.SEARCH,
+                             targeting={'queries': [f'фраза {i}' for i in range(11)]})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('targeting', response.data)
+
+    def test_patch_cpm_below_minimum(self):
+        boss_ad = create_ad(self.boss_client, Placement.SEARCH).data['id']
+        response = self.boss_client.patch(f'/api/ads/{boss_ad}/', {'cpm': 5}, format='json')
+        self.assertEqual((response.status_code, response.data['cpm']), (200, 5))
+
+        user_ad = create_ad(self.user_client, Placement.SEARCH).data['id']
+        response = self.user_client.patch(f'/api/ads/{user_ad}/', {'cpm': 5}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['cpm'][0], "CPM can't be less than 1000")
 
 
 @override_settings(**ADGRAM_SETTINGS)

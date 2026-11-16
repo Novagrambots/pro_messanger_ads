@@ -7,12 +7,13 @@ from django.http import Http404
 from django.db import transaction
 from rest_framework.views import APIView
 
+from apps.ads.serving import legacy
 from apps.common.models import ModerationStatus
 from apps.common.pagination import StandardResultsSetPagination
 from apps.common.permissions import HasServerApiKey
 from apps.common.schema import ERROR_RESPONSE, ORDER_CREATE_ERROR_RESPONSES, SERVER_API_KEY_AUTH
 
-from .models import Order, Tag, AdView
+from .models import Order, AdView
 from .serializers import (CreateChannelOrderSerializer, ResponsesMessageSerializer, OrderDetailSerializer,
                                          OrderActivationSerializer, SearchRequestSerializer, SearchResultSerializer,
                                          ClickOrderSerializer)
@@ -244,11 +245,14 @@ class SearchChannelsView(generics.GenericAPIView):
     Поиск рекламы по тегу с учетом лимита показов на пользователя.
     Успешный ответ — это засчитанный показ: у заказа атомарно списывается
     один показ (тратится бюджет рекламодателя).
+    Мост старых версий (apps/ads/serving/legacy.py): тег — это фраза поиска v2, в том же аукционе
+    крутятся объявления v2 (order_id — id объявления); лимиты запросов — как у выдачи v2.
     Доступ — только по заголовку X-API-Key (server-to-server от NovaGram).
     """
     serializer_class = SearchRequestSerializer
     permission_classes = [HasServerApiKey]  # только запросы с сервера NovaGram (по API-ключу)
-    throttle_classes = []  # доверенный сервер (server-to-server), глобальный троттл 500/min тут не нужен
+    # Глобальный троттл DRF не нужен: лимиты на зрителя и IP (как у выдачи v2) ставит мост в Redis
+    throttle_classes = []
 
     @extend_schema(request=SearchRequestSerializer, auth=SERVER_API_KEY_AUTH, responses={
         200: SearchResultSerializer,
@@ -270,57 +274,50 @@ class SearchChannelsView(generics.GenericAPIView):
         tag = request_serializer.validated_data['tag'].strip().lower()
         viewer_id = request_serializer.validated_data['viewer_id'].strip()
 
-        # 2. Пробуем найти подходящий заказ для показа
-        result = self._find_suitable_order(tag, viewer_id)
+        # 2. Лимиты запросов и лучшее объявление v2 (без Postgres). Лимит превышен — «рекламы нет»
+        offer = legacy.offer_search(request, tag, viewer_id)
+        if offer is legacy.LIMITED:
+            return self._not_found()
 
-        if result:
-            # 3. Сериализуем результат с помощью SearchResultSerializer
-            result_serializer = SearchResultSerializer(data=result)
-            result_serializer.is_valid(raise_exception=True)
-            return Response(result_serializer.data, status=status.HTTP_200_OK)
-        else:
-            return Response(
-                {'error': 'Нет доступной рекламы по данному тегу для вашего пользователя'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        # 3. Старые заказы с этим тегом — из Postgres, только если они есть (индекс в снимке выдачи).
+        #    Общий аукцион: старые заказы и объявление v2 — по цене за 1000 показов
+        orders = self._get_sorted_orders_by_tag(tag) if legacy.may_have_search_orders(offer, tag) else ()
+        result, shown = legacy.run(request, offer, orders, lambda order: self._show_order(order, viewer_id))
+        if shown is not None:
+            result = legacy.search_result(shown)
+        if result is None:
+            return self._not_found()
 
-    def _find_suitable_order(self, tag_name, viewer_id):
-        """Поиск подходящего заказа для показа по точному совпадению тега"""
-        try:
-            # Ищем точное совпадение тега
-            tag_obj = Tag.objects.get(name=tag_name)
-            orders = self._get_sorted_orders_by_tag(tag_obj)
-            return self._process_orders(orders, viewer_id)
-        except Tag.DoesNotExist:
-            # Если тег не найден - сразу возвращаем None
-            return None
+        # 4. Сериализуем результат с помощью SearchResultSerializer
+        result_serializer = SearchResultSerializer(data=result)
+        result_serializer.is_valid(raise_exception=True)
+        return Response(result_serializer.data, status=status.HTTP_200_OK)
 
-    def _get_sorted_orders_by_tag(self, tag_obj):
-        """Получает активные одобренные заказы с тегом, отсортированные по SPM"""
+    @staticmethod
+    def _not_found():
+        return Response({'error': 'Нет доступной рекламы по данному тегу для вашего пользователя'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    def _get_sorted_orders_by_tag(self, tag_name):
+        """Активные одобренные заказы с тегом (точное совпадение), по убыванию SPM"""
         return Order.objects.filter(
-            tags=tag_obj,
+            tags__name=tag_name,
             status=ModerationStatus.APPROVED,  # показываем только прошедшее модерацию
             is_active=True,
             cancelled=False,
             remaining_views__gt=0
         ).select_related('channel_id').order_by('-spm')
 
-    def _process_orders(self, orders, viewer_id):
-        """Обрабатывает список заказов, находит подходящий для показа"""
-        for order in orders:
-            # Пытаемся показать рекламу
-            success = self._try_show_ad_to_user(order, viewer_id)
-
-            if success:
-                # Подготавливаем данные для SearchResultSerializer
-                return {
-                    'channel_id': order.channel_id.channel_id,
-                    'channel_name': order.channel_id.channel_name,
-                    'order_id': order.order_id,
-                    'platform': order.platform
-                }
-
-        return None
+    def _show_order(self, order, viewer_id):
+        """Показать старый заказ: данные для SearchResultSerializer или None (лимит, бюджет кончился)"""
+        if not self._try_show_ad_to_user(order, viewer_id):
+            return None
+        return {
+            'channel_id': order.channel_id.channel_id,
+            'channel_name': order.channel_id.channel_name,
+            'order_id': order.order_id,
+            'platform': order.platform
+        }
 
     def _try_show_ad_to_user(self, order, viewer_id):
         """
@@ -387,6 +384,10 @@ class ClickView(APIView):
         },
     })
     def post(self, request):
+        # 0. Мост старых версий: клик по объявлению v2, выданному этому зрителю через старый поиск
+        if legacy.click(request, request.data):
+            return self._clicked()
+
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -400,9 +401,11 @@ class ClickView(APIView):
         # 3. Сохраняем ТОЛЬКО поле clicks, не трогая остальные
         order.updated_at = timezone.now()
         order.save(update_fields=['clicks', 'updated_at'])
+        return self._clicked()
 
+    @staticmethod
+    def _clicked():
         response_data = {'message': 'Пользователь перешел по рекламе. (Кликнул по рекламе)'}
         response_serializer = ResponsesMessageSerializer(data=response_data)
         response_serializer.is_valid(raise_exception=True)
-
         return Response(response_serializer.data, status=status.HTTP_200_OK)

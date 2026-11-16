@@ -85,7 +85,7 @@ def _channel_id(value):
     return int(value) if CHANNEL_ID_RE.fullmatch(value) else None
 
 
-def _viewer_profile(snap, data, request, history):
+def viewer_profile(snap, data, request, history):
     """
     Профиль для формата «Пользователи» — только в памяти: страна по phone_country (иначе по IP),
     локации — город по IP и его область (если IP из той же страны), язык, устройство,
@@ -172,7 +172,7 @@ def serve(request):
         if limited:
             return _error('Слишком много запросов', 429)
         snap = snapshot.current()
-        profile = _viewer_profile(snap, data, request, history) if slot != Slot.SEARCH else None
+        profile = viewer_profile(snap, data, request, history) if slot != Slot.SEARCH else None
         entry = selection.pick(snap, slot, key, viewer, profile=profile)
     except (redis.RedisError, DatabaseError):
         # Без Redis выдачи нет: пустой ответ с коротким кэшем на клиенте
