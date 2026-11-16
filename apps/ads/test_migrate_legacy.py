@@ -14,10 +14,11 @@ from django.utils import timezone
 
 from apps.ads.management.commands.migrate_legacy_search import cpm_from, queries_from
 from apps.ads.models import Ad, AdDailyStat, AdStatus, Placement
-from apps.ads.tests import (call_locked, client_for, ensure_test_peers, make_local_user,  # noqa: F401
+from apps.ads.tests import (KUNUZ_ID, call_locked, client_for, ensure_test_peers, make_local_user,  # noqa: F401
                             setUpModule, tearDownModule)
 from apps.billing.models import Balance, MoneyOperation as Op
 from apps.common.models import ModerationStatus
+from apps.directories.models import TelegramPeer
 from apps.moderation.test_ads import make_moderator
 from apps.search_ads.models import Order
 
@@ -156,6 +157,40 @@ class MigrateLegacySearchTests(TestCase):
             self.assertFalse(Ad.objects.filter(legacy_order_id=order.pk).exists())
         ad = Ad.objects.get(legacy_order_id=archived.pk)
         self.assertEqual((ad.status, ad.targeting), (AdStatus.DELETED, {'queries': []}))
+
+
+    def test_channel_id_mismatch_not_promoted(self):
+        """Старый id канала ведёт не туда, куда username: живой заказ не переносим (рекламировали бы чужой канал)"""
+        live = self.old_order(channel_id='-1009999999999')  # у kunuz id другой
+        archived = self.old_order(channel_id='-1009999999999', cancelled=True, is_active=False, remaining_views=0,
+                                  refunded=Decimal('100'))
+        out = self.run_command('--apply')
+        self.assertIn("eski kanal id'si username'dagi kanalga mos emas", out)
+        self.assertFalse(Ad.objects.filter(legacy_order_id=live.pk).exists())
+        live.refresh_from_db()
+        self.assertEqual((live.cancelled, live.is_active), (False, True))
+        self.assertIsNone(Ad.objects.get(legacy_order_id=archived.pk).promoted_peer)  # архив — без чужого канала
+
+    def test_user_account_only_for_superadmin(self):
+        """Заказ, рекламирующий аккаунт пользователя: у суперадмина переносится (кнопка USER), у других — нет"""
+        for name in ('boss_admin', 'adv_admin'):
+            TelegramPeer.objects.create(username=name, peer_type=TelegramPeer.PeerType.USER, title=name,
+                                        fetched_at=timezone.now())
+        boss_order = self.old_order(channel='boss_admin', channel_id='-1008728334742')  # id «канала» — мусор
+        adv = make_local_user('adv')
+        adv_order = self.old_order(client=client_for(adv), channel='adv_admin')
+
+        out = self.run_command('--apply')
+        self.assertIn('akkaunt reklama qilinadi (kanal emas): @boss_admin — 1 ta', out)
+        ad = Ad.objects.get(legacy_order_id=boss_order.pk)
+        self.assertEqual((ad.status, ad.promoted_type, ad.action_type), (AdStatus.ACTIVE, 'USER', 'MESSAGE'))
+        self.assertFalse(Ad.objects.filter(legacy_order_id=adv_order.pk).exists())
+
+    def test_channel_id_match_is_fine(self):
+        order = self.old_order(channel_id=str(KUNUZ_ID))
+        self.run_command('--apply')
+        ad = Ad.objects.get(legacy_order_id=order.pk)
+        self.assertEqual((ad.status, ad.promoted_peer.telegram_id), (AdStatus.ACTIVE, KUNUZ_ID))
 
 
 class MigrateHelpersTests(SimpleTestCase):

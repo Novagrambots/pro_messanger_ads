@@ -54,9 +54,10 @@ class InitialStatus(models.TextChoices):
 
 
 class ActionType(models.TextChoices):
-    """Действие после перехода по рекламе: подписка на канал или запуск бота"""
+    """Действие после перехода по рекламе: подписка на канал, запуск бота или сообщение пользователю"""
     JOIN = 'JOIN', 'Подписка на канал'
     START = 'START', 'Запуск бота'
+    MESSAGE = 'MESSAGE', 'Сообщение пользователю'  # реклама аккаунта — только у суперадмина
 
 
 class AdStateError(Exception):
@@ -326,18 +327,22 @@ class Ad(models.Model):
 
     @property
     def promoted_type(self):
-        """CHANNEL или BOT. У объявлений до этапа 5а нет promoted_peer — по имени из ссылки"""
+        """
+        CHANNEL, BOT или USER (аккаунт — только у суперадмина). У объявлений до этапа 5а нет promoted_peer —
+        по имени из ссылки
+        """
         from apps.directories.models import TelegramPeer
         peer = self.promoted_peer
-        if peer and peer.peer_type in (TelegramPeer.PeerType.CHANNEL, TelegramPeer.PeerType.BOT):
+        if peer and peer.peer_type in (TelegramPeer.PeerType.CHANNEL, TelegramPeer.PeerType.BOT,
+                                       TelegramPeer.PeerType.USER):
             return peer.peer_type
         is_bot = self.promoted_username.lower().endswith('bot')
         return TelegramPeer.PeerType.BOT if is_bot else TelegramPeer.PeerType.CHANNEL
 
     @property
     def action_type(self):
-        """Какое действие считаем: подписка на канал или запуск бота (текст переводит фронт)"""
-        return ActionType.START if self.promoted_type == 'BOT' else ActionType.JOIN
+        """Какое действие считаем: подписка на канал, запуск бота, сообщение пользователю (текст переводит фронт)"""
+        return {'BOT': ActionType.START, 'USER': ActionType.MESSAGE}.get(self.promoted_type, ActionType.JOIN)
 
     def remaining_budget(self):
         """Остаток бюджета: budget − spent − refunded (точно)"""

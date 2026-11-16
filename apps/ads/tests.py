@@ -351,6 +351,21 @@ class SuperadminLimitsTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('targeting', response.data)
 
+    def test_superadmin_can_promote_user_account(self):
+        """Аккаунт пользователя (напр. «напиши админу») рекламирует только суперадмин; кнопка — USER"""
+        from apps.ads.serving.snapshot import make_entry
+        TelegramPeer.objects.create(username='shop_admin', peer_type=TelegramPeer.PeerType.USER, title='Admin',
+                                    fetched_at=timezone.now())
+        response = create_ad(self.boss_client, Placement.SEARCH, url='https://t.me/shop_admin')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['action_type'], 'MESSAGE')
+        ad = Ad.objects.get(pk=response.data['id'])
+        self.assertEqual(make_entry(ad).payload['button_type'], 'USER')
+
+        response = create_ad(self.user_client, Placement.SEARCH, url='https://t.me/shop_admin')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['url'][0], '@shop_admin — не канал и не бот')
+
     def test_patch_cpm_below_minimum(self):
         boss_ad = create_ad(self.boss_client, Placement.SEARCH).data['id']
         response = self.boss_client.patch(f'/api/ads/{boss_ad}/', {'cpm': 5}, format='json')
