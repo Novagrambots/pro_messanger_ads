@@ -11,6 +11,8 @@
 - клик приходит как order_id + viewer_id без токена: токен выдачи лежит в Redis (store.legacy_key)
   столько же, сколько живёт random_id. Без выдачи этому зрителю клик по объявлению v2 не засчитывается;
 - объявления v2 — только зрителю с числовым viewer_id (id Telegram → тот же viewer_key, что у новых версий);
+- рекламу аккаунта пользователя (promoted USER) старым версиям не отдаём: протокол знает только каналы,
+  а показ списывается сразу при выдаче;
 - старые заказы, пока они крутятся, участвуют в том же аукционе по цене (spm и cpm — сумы за 1000 показов).
   Где их нет (LegacyIndex в снимке), в Postgres не ходим.
 
@@ -44,7 +46,7 @@ from .views import CHANNEL_ID_RE, viewer_profile
 logger = logging.getLogger(__name__)
 
 LIMITED = 'limited'    # превышен лимит запросов — старому клиенту «рекламы нет»
-PLATFORM = 'TELEGRAM'  # объявления v2 продвигают каналы и ботов Telegram (ссылка t.me)
+PLATFORM = 'TELEGRAM'  # объявления v2 для старых версий — каналы и боты Telegram (ссылка t.me)
 # Тип медиа v2 → как его называл старый ChatAdMedia
 MEDIA_TYPES = {AdMedia.MediaType.PHOTO: 'IMAGE', AdMedia.MediaType.VIDEO: 'VIDEO'}
 # Старый заказ ещё крутится (те же условия, что у старых вьюх выдачи)
@@ -158,7 +160,9 @@ def _offer(request, viewer_id, slot, key):
         if viewer is not None and key is not None:
             # Старый клиент не шлёт язык и страну телефона — для «Пользователей» страна и город по IP
             profile = viewer_profile(snap, {}, request, history) if slot != Slot.SEARCH else None
-            entry = selection.pick(snap, slot, key, viewer, profile=profile)
+            # Старый протокол — про каналы (channel_id / channel_name): аккаунт пользователя старое приложение
+            # не покажет, а показ списывается уже при выдаче — такие объявления в аукцион не берём
+            entry = selection.pick(snap, slot, key, viewer, profile=profile, skip_user_accounts=True)
     except (redis.RedisError, DatabaseError):
         _log_outage('Мост старых версий: выдача v2 недоступна — работают только старые заказы')
         return None

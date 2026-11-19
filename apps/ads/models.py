@@ -57,7 +57,7 @@ class ActionType(models.TextChoices):
     """Действие после перехода по рекламе: подписка на канал, запуск бота или сообщение пользователю"""
     JOIN = 'JOIN', 'Подписка на канал'
     START = 'START', 'Запуск бота'
-    MESSAGE = 'MESSAGE', 'Сообщение пользователю'  # реклама аккаунта — только у суперадмина
+    MESSAGE = 'MESSAGE', 'Сообщение пользователю'  # реклама аккаунта пользователя
 
 
 class AdStateError(Exception):
@@ -328,7 +328,7 @@ class Ad(models.Model):
     @property
     def promoted_type(self):
         """
-        CHANNEL, BOT или USER (аккаунт — только у суперадмина). У объявлений до этапа 5а нет promoted_peer —
+        CHANNEL, BOT или USER (аккаунт пользователя). У объявлений до этапа 5а нет promoted_peer —
         по имени из ссылки
         """
         from apps.directories.models import TelegramPeer

@@ -9,6 +9,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from django.test import RequestFactory, SimpleTestCase, override_settings
+from django.utils import timezone
 
 from apps.ads.models import Ad, Placement
 from apps.ads.serving import legacy, snapshot, store as S
@@ -16,6 +17,7 @@ from apps.ads.test_serving import (API_KEY, GAZETA_ID, QUERY, REDIS_DOWN, Channe
                                    ServingBase, setUpModule, tearDownModule)
 from apps.ads.tests import DARYO_ID, KUNUZ_ID, client_for, create_ad, make_local_user
 from apps.chat_ads.models import ChatAdOrder
+from apps.directories.models import TelegramPeer
 from apps.partner.models import ChannelEarning, EarningTransaction
 from apps.search_ads.models import Order
 
@@ -90,6 +92,24 @@ class LegacySearchTests(LegacyMixin, ServingBase):
         self.assertEqual(self.serve_ad(2)['placement'], Placement.SEARCH)  # и новой версии
         self.flush()
         self.assertEqual((self.fresh(ad).views_total, self.fresh(ad).spent), (1, Decimal('0.001')))
+
+    def test_user_account_ad_not_served_to_old_versions(self):
+        """Аккаунт пользователя старое приложение не покажет, а показ списывается при выдаче — старым не отдаём"""
+        account = self.active_ad()
+        peer = TelegramPeer.objects.create(username='shop_admin', peer_type=TelegramPeer.PeerType.USER,
+                                           title='Admin', fetched_at=timezone.now())
+        Ad.objects.filter(pk=account.pk).update(promoted_peer=peer, url='https://t.me/shop_admin')
+        self.reload()
+        self.assertEqual(self.old_search('1').status_code, 404)  # «рекламы нет», а не чужой формат
+        self.flush()
+        self.assertEqual((self.fresh(account).views_total, self.fresh(account).spent), (0, Decimal('0')))
+        self.assertEqual(self.serve_ad(1)['promoted']['type'], 'USER')  # новые версии — как раньше
+
+        channel = self.active_ad()
+        self.reload()
+        response = self.old_search('2')
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()['order_id'], str(channel.pk))
 
     def test_tag_is_normalized_like_search_phrase(self):
         self.active_ad(queries=['oʻzbek tili'])

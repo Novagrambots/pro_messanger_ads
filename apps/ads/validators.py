@@ -16,6 +16,8 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from apps.ads.models import Placement, USERS_PLACEMENTS
+from apps.ads.serving.audience import DEVICE_ALIASES
+from apps.ads.serving.selection import NO_USER_ACCOUNT_PLATFORMS
 from apps.directories import services as directories
 from apps.directories.models import TelegramPeer
 from apps.directories.telegram import (NotCheckedInTime, TelegramUnavailable, not_bot_error, not_bots,
@@ -25,6 +27,9 @@ from apps.directories.telegram import (NotCheckedInTime, TelegramUnavailable, no
 # Список ещё согласуем с мобильщиками — менять только здесь
 DEVICES = ('ios', 'android', 'desktop')
 POLITICS = ('only', 'exclude')  # показывать только в каналах о политике / не показывать в них
+# Устройства, где реклама аккаунта пользователя не показывается (их клиенты рисуют только канал и бота)
+NO_USER_ACCOUNT_DEVICES = frozenset(DEVICE_ALIASES[platform] for platform in NO_USER_ACCOUNT_PLATFORMS)
+ERR_USER_ACCOUNT_DEVICES = 'Реклама аккаунта пользователя на Android не показывается — добавьте iOS или desktop'
 
 MAX_CHANNELS = 100  # в каждом поле со списком каналов
 MAX_BOTS = 100
@@ -69,21 +74,22 @@ def parse_promoted_url(value):
         raise serializers.ValidationError('Нужна ссылка вида t.me/<username>')
 
 
-# Что можно продвигать: канал или бота; суперадмину — ещё и аккаунт пользователя (свои кампании, напр. «напиши админу»)
-PROMOTABLE = (PeerType.CHANNEL, PeerType.BOT)
-SUPERADMIN_PROMOTABLE = (*PROMOTABLE, PeerType.USER)
+# Что можно продвигать: канал, бота или аккаунт пользователя (кнопка «написать», как «напиши админу»).
+# Группы и неизвестные — нет
+PROMOTABLE = (PeerType.CHANNEL, PeerType.BOT, PeerType.USER)
+ERR_NOT_PROMOTABLE = '@{} — не канал, не бот и не аккаунт пользователя'
 
 
-def check_promoted_peer(username, resolve_peers, superadmin=False):
-    """Продвигать можно канал или бота (суперадмину — и пользователя) — проверяем в Telegram. Возвращает TelegramPeer"""
+def check_promoted_peer(username, resolve_peers):
+    """Продвигать можно канал, бота или аккаунт пользователя — проверяем в Telegram. Возвращает TelegramPeer"""
     try:
         peer = resolve_peers([username])[username]
     except TelegramUnavailable:
         raise serializers.ValidationError(ERR_TELEGRAM_DOWN)
     if peer.not_found:
         raise serializers.ValidationError(f'@{username} не найден в Telegram')
-    if peer.peer_type not in (SUPERADMIN_PROMOTABLE if superadmin else PROMOTABLE):
-        raise serializers.ValidationError(f'@{username} — не канал и не бот')
+    if peer.peer_type not in PROMOTABLE:
+        raise serializers.ValidationError(ERR_NOT_PROMOTABLE.format(username))
     return peer
 
 
@@ -335,7 +341,7 @@ def validate_targeting(placement, data, promoted_peer, resolve_peers, superadmin
     if placement == Placement.CHANNEL_MESSAGE:
         _channel_message_rules(result, promoted_peer)
     elif placement in USERS_PLACEMENTS:
-        _users_rules(result)
+        _users_rules(result, promoted_peer)
     return result
 
 
@@ -393,9 +399,14 @@ def _channel_message_rules(targeting, promoted_peer):
             excluded.append({'username': promoted_peer.username, 'id': promoted_peer.telegram_id})
 
 
-def _users_rules(targeting):
+def _users_rules(targeting, promoted_peer):
     if not targeting['countries']:
         raise serializers.ValidationError({'countries': 'Выберите хотя бы одну страну'})
+    # Не все клиенты рисуют аккаунт пользователя (Android — только канал и бот): выдача им такие объявления
+    # не отдаёт. Если выбраны только такие устройства — объявление не покажется нигде
+    devices = set(targeting['devices'])
+    if promoted_peer and promoted_peer.peer_type == PeerType.USER and devices and devices <= NO_USER_ACCOUNT_DEVICES:
+        raise serializers.ValidationError({'devices': ERR_USER_ACCOUNT_DEVICES})
     # Локация должна быть в одной из выбранных стран
     location_countries = directories.location_countries()
     wrong = [str(location) for location in targeting['locations']

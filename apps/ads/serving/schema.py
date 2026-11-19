@@ -57,8 +57,8 @@ AD = {
             },
         },
         'button_type': {'type': 'string', 'enum': ['CHANNEL', 'BOT', 'USER'],
-                        'description': 'Текст кнопки переводит клиент. USER — аккаунт пользователя (написать ему), '
-                                       'бывает только у объявлений суперадмина'},
+                        'description': 'Текст кнопки переводит клиент. USER — аккаунт пользователя (написать ему); '
+                                       'клиенту с platform=android такие объявления не приходят'},
         'media': {
             'type': 'object', 'nullable': True,
             'properties': {
@@ -100,7 +100,7 @@ EVENTS_REQUEST = {
                 'properties': {
                     'random_id': {'type': 'string'},
                     'type': {'type': 'string', 'enum': ['view', 'click', 'action', 'video_open'],
-                             'description': 'action — подписался на канал / запустил бота после клика '
+                             'description': 'action — подписался на канал / запустил бота / написал аккаунту после клика '
                                             '(только после click по этому random_id); video_open — открыл '
                                             'видео объявления'},
                     'duration_ms': {'type': 'integer', 'description': 'Необязательно, сервер не проверяет'},
