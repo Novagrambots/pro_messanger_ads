@@ -2,8 +2,8 @@ from django.urls import include, path
 
 from apps.ads.serving import views as serving
 from apps.ads.views import (AdBudgetHistoryView, AdBudgetTopUpView, AdCopyToDraftView, AdDetailView, AdDraftView,
-                            AdListCreateView, AdMediaDetailView, AdMediaUploadView, AdPricingView, AdStatsView,
-                            AdTableSettingsView)
+                            AdListCreateView, AdMediaDetailView, AdMediaUploadView, AdPricingView, AdSharesBulkView,
+                            AdSharesView, AdStatsView, AdTableSettingsView)
 from apps.directories.views import SimilarBotsView, SimilarChannelsView, TelegramResolveView
 
 
@@ -22,7 +22,9 @@ urlpatterns = [
     path('resolve/', TelegramResolveView.as_view(), name='ads-resolve'),
     path('similar-channels/', SimilarChannelsView.as_view(), name='ads-similar-channels'),
     path('similar-bots/', SimilarBotsView.as_view(), name='ads-similar-bots'),
+    path('shares/', AdSharesBulkView.as_view(), name='ads-shares-bulk'),
     path('<uuid:pk>/', AdDetailView.as_view(), name='ads-detail'),
+    path('<uuid:pk>/shares/', AdSharesView.as_view(), name='ads-shares'),
     path('<uuid:pk>/budget/', AdBudgetTopUpView.as_view(), name='ads-budget'),
     path('<uuid:pk>/budget-history/', AdBudgetHistoryView.as_view(), name='ads-budget-history'),
     path('<uuid:pk>/stats/', AdStatsView.as_view(), name='ads-stats'),

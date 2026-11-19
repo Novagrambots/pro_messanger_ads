@@ -1,6 +1,7 @@
 import logging
 from datetime import date, timedelta
 
+from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Case, DecimalField, F, FloatField, Prefetch, Q, Value, When
 from django.db.models.functions import Cast, Lower, NullIf
@@ -16,11 +17,12 @@ from rest_framework.views import APIView
 from apps.ads import stats
 from apps.ads.media import MediaError, save_upload
 from apps.ads.models import (DEFAULT_TABLE_COLUMNS, TABLE_COLUMNS, Ad, AdDraft, AdMedia, AdPricing, AdRevision,
-                             AdStateError, AdStatus, AdTableSettings)
+                             AdShare, AdStateError, AdStatus, AdTableSettings)
 from apps.ads.serializers import (AdBudgetTopUpSerializer, AdCreateSerializer, AdDraftSerializer, AdMediaSerializer,
-                                  AdPricingSerializer, AdSerializer, AdTableSettingsSerializer, AdUpdateSerializer,
-                                  BudgetOperationSerializer)
+                                  AdPricingSerializer, AdSerializer, AdSharesBulkSerializer, AdSharesSerializer,
+                                  AdTableSettingsSerializer, AdUpdateSerializer, BudgetOperationSerializer)
 from apps.ads.serving.store import ServingUnavailable
+from apps.account.services import ADGRAM_USER_ID_RE, AdGramUsernameTaken, get_or_create_adgram_user
 from apps.billing.models import MoneyOperation
 from apps.billing.services import charge, format_money, refund_wallet_amount
 from apps.common.pagination import StandardResultsSetPagination
@@ -45,6 +47,18 @@ SERVING_DOWN = 'Сервис выдачи рекламы временно нед
 def own_ads(user):
     """Свои объявления владельца; удалённые в API не видны"""
     return Ad.objects.filter(user=user).exclude(status=AdStatus.DELETED)
+
+
+def visible_ads(user):
+    """
+    Свои + показанные суперадмином (AdShare): их видно в списке, деталях и статистике, а у чужих можно
+    только ставить на паузу / снимать с паузы. Подзапрос, а не JOIN — без дублей и без distinct
+    """
+    shared = AdShare.objects.filter(user=user).values('ad_id')
+    return Ad.objects.filter(Q(user=user) | Q(pk__in=shared)).exclude(status=AdStatus.DELETED)
+
+
+SHARED_EDITABLE = {'status'}  # что можно менять в чужом показанном объявлении
 
 
 def state_error(exc):
@@ -98,7 +112,7 @@ class AdListCreateView(generics.ListCreateAPIView):
         if getattr(self, 'swagger_fake_view', False):
             return Ad.objects.none()
         # Канал, медиа и правки — заранее, без запросов на каждую строку
-        queryset = own_ads(self.request.user).select_related('promoted_peer', 'media').prefetch_related(
+        queryset = visible_ads(self.request.user).select_related('promoted_peer', 'media').prefetch_related(
             Prefetch('revisions', queryset=AdRevision.objects.select_related('media').order_by('-created_at'),
                      to_attr='listed_revisions'))
         query = self.request.query_params.get('q', '').strip()
@@ -132,7 +146,10 @@ class AdDetailView(generics.GenericAPIView):
     def get_queryset(self):
         if getattr(self, 'swagger_fake_view', False):
             return Ad.objects.none()
-        return own_ads(self.request.user)
+        # Показанное суперадмином чужое объявление: смотреть и ставить на паузу (PATCH status), не удалять
+        if self.request.method == 'DELETE':
+            return own_ads(self.request.user)
+        return visible_ads(self.request.user)
 
     def get(self, request, pk):
         return Response(AdSerializer(self.get_object(), context={'request': request}).data)
@@ -143,7 +160,11 @@ class AdDetailView(generics.GenericAPIView):
         400: STATE_ERROR_RESPONSE,
     })
     def patch(self, request, pk):
-        serializer = AdUpdateSerializer(instance=self.get_object(), data=request.data, partial=True,
+        ad = self.get_object()
+        if ad.user_id != request.user.pk and (not request.data or set(request.data) - SHARED_EDITABLE):
+            return Response({'error': 'Это объявление вам показал администратор: можно только ставить на паузу '
+                                      'и снимать с паузы (status)'}, status=status.HTTP_403_FORBIDDEN)
+        serializer = AdUpdateSerializer(instance=ad, data=request.data, partial=True,
                                         context=self.get_serializer_context())
         serializer.is_valid(raise_exception=True)
         settings_changes, creative_changes = serializer.split()
@@ -338,7 +359,7 @@ class AdStatsView(generics.GenericAPIView):
     def get_queryset(self):
         if getattr(self, 'swagger_fake_view', False):
             return Ad.objects.none()
-        return own_ads(self.request.user)
+        return visible_ads(self.request.user)
 
     @extend_schema(parameters=[
         OpenApiParameter('from', str, description='Первый день, YYYY-MM-DD'),
@@ -369,7 +390,7 @@ class AdBudgetHistoryView(generics.ListAPIView):
     def get_queryset(self):
         if getattr(self, 'swagger_fake_view', False):
             return MoneyOperation.objects.none()
-        ad = get_object_or_404(own_ads(self.request.user), pk=self.kwargs['pk'])
+        ad = get_object_or_404(visible_ads(self.request.user), pk=self.kwargs['pk'])
         return MoneyOperation.objects.filter(
             order_type=MoneyOperation.OrderType.ADS, order_id=ad.pk,
         ).order_by('-created_at')
@@ -385,6 +406,7 @@ class AdPricingView(APIView):
 
 
 logger = logging.getLogger(__name__)
+User = get_user_model()
 MEDIA_UPLOAD_REQUEST = {'multipart/form-data': {'type': 'object', 'properties': {
     'file': {'type': 'string', 'format': 'binary',
              'description': 'Фото jpg/png (до 5 МБ) или видео mp4/mov (до 20 МБ, 3–60 с); 16:9, ширина от 640 px'},
@@ -436,3 +458,83 @@ class AdMediaDetailView(generics.RetrieveAPIView):
             return AdMedia.objects.none()
         return AdMedia.objects.filter(user=self.request.user)
 
+
+
+class IsSuperuser(permissions.BasePermission):
+    message = 'Показывать объявления другим может только суперадмин'
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.is_superuser)
+
+
+def share_users(items):
+    """Пользователи new_dvs для списка из AdShareUserSerializer; юзеры AdGram создаются «тенью», как при входе"""
+    users = []
+    for item in items:
+        if item.get('user_id'):
+            users.append(get_object_or_404(User, user_id=item['user_id']))
+            continue
+        adgram_user_id = item['adgram_user_id']
+        if not ADGRAM_USER_ID_RE.fullmatch(adgram_user_id):
+            raise serializers.ValidationError({'adgram_user_id': f'Неверный id пользователя AdGram: {adgram_user_id}'})
+        try:
+            users.append(get_or_create_adgram_user(adgram_user_id, item.get('adgram_username') or ''))
+        except AdGramUsernameTaken:
+            raise serializers.ValidationError({'adgram_user_id': f'Имя для {adgram_user_id} уже занято'})
+    return users
+
+
+def shares_payload(ad):
+    shares = AdShare.objects.filter(ad=ad).select_related('user').order_by('created_at')
+    return {'ad_id': str(ad.pk), 'users': [{
+        'user_id': str(share.user.user_id),
+        'username': share.user.username,
+        'adgram_user_id': share.user.adgram_user_id,
+        'adgram_username': share.user.adgram_username,
+        'shared_at': share.created_at,
+    } for share in shares]}
+
+
+class AdSharesView(APIView):
+    """Кому суперадмин показал объявление: GET — список, PUT — заменить список целиком (users: [] — скрыть от всех)"""
+    permission_classes = [IsSuperuser]
+
+    def get(self, request, pk):
+        return Response(shares_payload(get_object_or_404(Ad, pk=pk)))
+
+    @extend_schema(request=AdSharesSerializer)
+    def put(self, request, pk):
+        ad = get_object_or_404(Ad, pk=pk)
+        serializer = AdSharesSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        users = [user for user in share_users(serializer.validated_data['users']) if user.pk != ad.user_id]
+        with transaction.atomic():
+            AdShare.objects.filter(ad=ad).exclude(user__in=users).delete()
+            existing = set(AdShare.objects.filter(ad=ad).values_list('user_id', flat=True))
+            AdShare.objects.bulk_create([AdShare(ad=ad, user=user) for user in users if user.pk not in existing],
+                                        ignore_conflicts=True)
+        return Response(shares_payload(ad))
+
+
+class AdSharesBulkView(APIView):
+    """Массово показать / скрыть: ad_ids или all_own (все свои неудалённые), add и remove — пользователи"""
+    permission_classes = [IsSuperuser]
+
+    @extend_schema(request=AdSharesBulkSerializer)
+    def post(self, request):
+        serializer = AdSharesBulkSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        ads = Ad.objects.exclude(status=AdStatus.DELETED)
+        ads = ads.filter(user=request.user) if data['all_own'] else ads.filter(pk__in=data['ad_ids'])
+        ad_rows = list(ads.values_list('pk', 'user_id'))
+        add, remove = share_users(data['add']), share_users(data['remove'])
+        ad_ids = [pk for pk, _ in ad_rows]
+        with transaction.atomic():
+            removed, _ = AdShare.objects.filter(ad_id__in=ad_ids, user__in=remove).delete()
+            before = AdShare.objects.filter(ad_id__in=ad_ids).count()
+            AdShare.objects.bulk_create(
+                [AdShare(ad_id=pk, user=user) for pk, owner in ad_rows for user in add if user.pk != owner],
+                ignore_conflicts=True, batch_size=1000)
+            added = AdShare.objects.filter(ad_id__in=ad_ids).count() - before
+        return Response({'ads': len(ad_rows), 'added': added, 'removed': removed})
