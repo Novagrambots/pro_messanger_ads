@@ -113,6 +113,9 @@ class AdSerializer(serializers.ModelSerializer):
         help_text='Правка креатива на проверке (пока её не одобрят, крутится прежний вариант)')
     last_declined_revision = serializers.SerializerMethodField(
         help_text='Последняя правка, если её отклонили (с причиной); после новой правки — null')
+    shared = serializers.SerializerMethodField(
+        help_text='true — объявление чужое, суперадмин показал его вам: можно смотреть и ставить на паузу, '
+                  'править, пополнять и удалять — нельзя')
 
     class Meta:
         model = Ad
@@ -123,9 +126,14 @@ class AdSerializer(serializers.ModelSerializer):
             'status', 'initial_status', 'start_date', 'end_date', 'schedule', 'targeting', 'targeting_summary',
             'views', 'opened_video', 'clicks', 'actions', 'action_type', 'ctr', 'cvr', 'cpc', 'cpa',
             'moderation_reason', 'pending_revision', 'last_declined_revision',
-            'terms_version', 'terms_accepted_at', 'created_at', 'updated_at',
+            'terms_version', 'terms_accepted_at', 'created_at', 'updated_at', 'shared',
         ]
         read_only_fields = fields
+
+    def get_shared(self, obj) -> bool:
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        return bool(user and user.is_authenticated and obj.user_id != user.pk)
 
     def get_views(self, obj) -> int:
         return obj.views_total + obj.free_views_total
@@ -442,3 +450,33 @@ class AdDraftSerializer(serializers.Serializer):
         if len(json.dumps(value, ensure_ascii=False).encode()) > DRAFT_MAX_BYTES:
             raise serializers.ValidationError('Черновик больше 64 КБ')
         return value
+
+
+class AdShareUserSerializer(serializers.Serializer):
+    """Кому показать: пользователь new_dvs (user_id) или юзер AdGram (adgram_user_id + adgram_username)"""
+    user_id = serializers.UUIDField(required=False, help_text='Публичный UUID пользователя new_dvs (User.user_id)')
+    adgram_user_id = serializers.CharField(required=False, max_length=64)
+    adgram_username = serializers.CharField(required=False, allow_blank=True, max_length=150, default='')
+
+    def validate(self, attrs):
+        if not attrs.get('user_id') and not attrs.get('adgram_user_id'):
+            raise serializers.ValidationError('Укажите user_id или adgram_user_id')
+        return attrs
+
+
+class AdSharesSerializer(serializers.Serializer):
+    """Новый список тех, кому показано объявление (заменяет прежний целиком)"""
+    users = AdShareUserSerializer(many=True)
+
+
+class AdSharesBulkSerializer(serializers.Serializer):
+    """Массово: объявления (ad_ids или все свои — all_own) и кого добавить / убрать"""
+    ad_ids = serializers.ListField(child=serializers.UUIDField(), required=False, max_length=5000)
+    all_own = serializers.BooleanField(default=False)
+    add = AdShareUserSerializer(many=True, required=False, default=list)
+    remove = AdShareUserSerializer(many=True, required=False, default=list)
+
+    def validate(self, attrs):
+        if not attrs.get('ad_ids') and not attrs.get('all_own'):
+            raise serializers.ValidationError('Укажите ad_ids или all_own: true')
+        return attrs

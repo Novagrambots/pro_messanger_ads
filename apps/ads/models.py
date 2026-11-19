@@ -879,3 +879,24 @@ class AdDraft(models.Model):
         """Create a similar ad: черновик пользователя заменяется копией объявления"""
         draft, _ = cls.objects.update_or_create(user=ad.user, defaults={'data': cls.data_from_ad(ad)})
         return draft
+
+
+class AdShare(models.Model):
+    """
+    Суперадмин показывает объявление другому пользователю (кабинет AdGram и ERP): тот видит его в «Моих
+    объявлениях» вместе со статистикой и может ставить на паузу / снимать с паузы. Правка, бюджет, деньги
+    и удаление — только владельцу. Пользователь — обычно «тень» юзера AdGram (get_or_create_adgram_user)
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ad = models.ForeignKey(Ad, on_delete=models.CASCADE, related_name='shares', verbose_name='Объявление')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='shared_ads',
+                             verbose_name='Кому показано')
+    created_at = models.DateTimeField('Когда показано', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Показ объявления другому пользователю'
+        verbose_name_plural = 'Показы объявлений другим пользователям'
+        constraints = [models.UniqueConstraint(fields=['ad', 'user'], name='ads_adshare_unique_ad_user')]
+
+    def __str__(self):
+        return f'{self.ad_id} → {self.user_id}'

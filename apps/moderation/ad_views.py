@@ -80,7 +80,7 @@ class AllAdsListView(generics.ListAPIView):
 
     def get_queryset(self):
         queryset = (Ad.objects.exclude(status=AdStatus.DELETED)
-                    .select_related('user').order_by('-created_at'))
+                    .select_related('user').prefetch_related('shares__user').order_by('-created_at'))
         params = self.request.query_params
         if params.get('status') in AdStatus.values:
             queryset = queryset.filter(status=params['status'])

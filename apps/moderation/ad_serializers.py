@@ -15,13 +15,25 @@ class AdOwnerSerializer(serializers.Serializer):
     display_name = serializers.CharField(help_text='Имя для показа: adgram_username, а если пусто — username')
 
 
+class AdSharedWithSerializer(serializers.Serializer):
+    """Кому суперадмин показал объявление (AdShare)"""
+    user_id = serializers.UUIDField(source='user.user_id')
+    username = serializers.CharField(source='user.username')
+    adgram_user_id = serializers.CharField(source='user.adgram_user_id', allow_null=True)
+    adgram_username = serializers.CharField(source='user.adgram_username')
+
+
 class ModerationAdSerializer(AdSerializer):
-    """Объявление глазами модератора: как у владельца + кто владелец"""
+    """Объявление глазами модератора: как у владельца + кто владелец и кому показано"""
     owner = AdOwnerSerializer(source='user', read_only=True)
+    shared_with = AdSharedWithSerializer(source='shares', many=True, read_only=True)
 
     class Meta(AdSerializer.Meta):
-        fields = AdSerializer.Meta.fields + ['owner']
+        fields = AdSerializer.Meta.fields + ['owner', 'shared_with']
         read_only_fields = fields
+
+    def get_shared(self, obj) -> bool:
+        return False  # модератор видит объявление по роли, а не потому что ему показали
 
 
 class AdDecisionSerializer(serializers.ModelSerializer):
