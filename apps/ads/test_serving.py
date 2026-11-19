@@ -174,6 +174,44 @@ class SelectionTests(ServingBase):
         picked = {tokens.decode(self.serve_ad(user_id)['random_id']).ad_id for user_id in range(1, 60)}
         self.assertEqual(picked, {str(first.pk), str(second.pk)})
 
+    def test_android_never_gets_user_account(self):
+        """Android показывает только канал и бота: аккаунт пользователя в его аукционе не участвует"""
+        channel = self.active_ad()
+        account = self.active_ad()
+        peer = TelegramPeer.objects.create(username='shop_admin', peer_type=TelegramPeer.PeerType.USER,
+                                           title='Admin', fetched_at=timezone.now())
+        Ad.objects.filter(pk=account.pk).update(promoted_peer=peer, url='https://t.me/shop_admin')
+        self.reload()
+
+        def picked(platform):
+            found = set()
+            for user_id in range(1, 60):
+                body = {'placement': Placement.SEARCH, 'user_id': user_id, 'context': {'query': QUERY},
+                        'platform': platform}
+                response = self.client.post('/api/ads/serve/', json.dumps(body), content_type='application/json',
+                                            HTTP_X_API_KEY=API_KEY)
+                self.assertEqual(response.status_code, 200, response.content)
+                ad = response.json()['ads'][0]
+                found.add((tokens.decode(ad['random_id']).ad_id, ad['promoted']['type']))
+            return found
+
+        self.assertEqual(picked('android'), {(str(channel.pk), 'CHANNEL')})
+        self.assertEqual(picked('Android'), {(str(channel.pk), 'CHANNEL')})
+        self.assertEqual(picked('ios'), {(str(channel.pk), 'CHANNEL'), (str(account.pk), 'USER')})
+
+    def test_android_gets_nothing_when_only_user_account(self):
+        """Только аккаунт пользователя — Android получает «рекламы нет», а не пустое место на экране"""
+        account = self.active_ad()
+        peer = TelegramPeer.objects.create(username='shop_admin', peer_type=TelegramPeer.PeerType.USER,
+                                           title='Admin', fetched_at=timezone.now())
+        Ad.objects.filter(pk=account.pk).update(promoted_peer=peer, url='https://t.me/shop_admin')
+        self.reload()
+        body = {'placement': Placement.SEARCH, 'user_id': 1, 'context': {'query': QUERY}, 'platform': 'android'}
+        response = self.client.post('/api/ads/serve/', json.dumps(body), content_type='application/json',
+                                    HTTP_X_API_KEY=API_KEY)
+        self.assertEqual(response.json()['ads'], [])
+        self.assertIsNotNone(self.serve_ad())  # без platform (и у iOS) — как раньше
+
     def test_views_per_user_per_day(self):
         ad = self.active_ad()  # по умолчанию — 1 показ одному человеку в сутки
         snap = self.reload()

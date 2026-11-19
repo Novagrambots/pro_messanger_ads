@@ -14,10 +14,16 @@ import random
 from django.utils import timezone
 
 from apps.ads.models import Placement
+from apps.directories.models import TelegramPeer
 
 from . import audience
 from . import store as S
 from .snapshot import allowed_now
+
+
+USER_ACCOUNT = TelegramPeer.PeerType.USER  # аккаунт пользователя (рекламирует только суперадмин)
+# Клиенты, которые показывают в рекламе только канал и бота (Android: AdsManager.resolvePromoted)
+NO_USER_ACCOUNT_PLATFORMS = frozenset({'android'})
 
 
 class Slot:
@@ -87,10 +93,16 @@ def candidates_for(snapshot, slot, key, profile=None):
     return ()
 
 
-def pick(snapshot, slot, key, viewer, now=None, profile=None):
-    """Объявление для показа (AdEntry) или None. Один поход в Redis на всех кандидатов"""
+def pick(snapshot, slot, key, viewer, now=None, profile=None, skip_user_accounts=False):
+    """
+    Объявление для показа (AdEntry) или None. Один поход в Redis на всех кандидатов.
+    skip_user_accounts — клиент не умеет показывать аккаунт пользователя (Android: только канал и бот):
+    такие объявления в его аукционе не участвуют, иначе выигравший аккаунт = пустое место у зрителя
+    """
     now = now or timezone.now()
-    candidates = [entry for entry in candidates_for(snapshot, slot, key, profile) if allowed_now(entry.schedule, now)]
+    candidates = [entry for entry in candidates_for(snapshot, slot, key, profile)
+                  if allowed_now(entry.schedule, now)
+                  and not (skip_user_accounts and entry.payload['promoted']['type'] == USER_ACCOUNT)]
     if not candidates:
         return None
 

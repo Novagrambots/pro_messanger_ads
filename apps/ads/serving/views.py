@@ -173,7 +173,8 @@ def serve(request):
             return _error('Слишком много запросов', 429)
         snap = snapshot.current()
         profile = viewer_profile(snap, data, request, history) if slot != Slot.SEARCH else None
-        entry = selection.pick(snap, slot, key, viewer, profile=profile)
+        skip_users = (data.get('platform') or '').lower() in selection.NO_USER_ACCOUNT_PLATFORMS
+        entry = selection.pick(snap, slot, key, viewer, profile=profile, skip_user_accounts=skip_users)
     except (redis.RedisError, DatabaseError):
         # Без Redis выдачи нет: пустой ответ с коротким кэшем на клиенте
         _log_outage('Выдача объявлений недоступна')
