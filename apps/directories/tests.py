@@ -402,8 +402,12 @@ class TargetingWithDirectoriesTests(TempMediaMixin, TestCase):
         self.assertIn('не найден', str(self.invalid(Placement.CHANNEL_MESSAGE, {'channels': ['gone']})))
         self.assertIn('не канал', str(self.invalid(Placement.USERS_CHANNEL_MESSAGE,
                                                     {'countries': ['UZ'], 'channel_audiences': ['uzchat']})))
-        for url in ('t.me/uzchat', 't.me/someone', 't.me/gone'):
+        for url in ('t.me/uzchat', 't.me/gone'):
             self.invalid(Placement.BOT, TARGETING_BOT, key='url', url=url)
+        # Аккаунт пользователя продвигать можно (кнопка «написать»)
+        response = create_ad(self.client, Placement.BOT, targeting=TARGETING_BOT, url='t.me/someone')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['promoted_peer']['peer_type'], 'USER')
 
         # Продвигается бот — себя исключать не из чего
         response = create_ad(self.client, Placement.CHANNEL_MESSAGE, url='t.me/weatherbot',

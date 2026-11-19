@@ -351,21 +351,6 @@ class SuperadminLimitsTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('targeting', response.data)
 
-    def test_superadmin_can_promote_user_account(self):
-        """Аккаунт пользователя (напр. «напиши админу») рекламирует только суперадмин; кнопка — USER"""
-        from apps.ads.serving.snapshot import make_entry
-        TelegramPeer.objects.create(username='shop_admin', peer_type=TelegramPeer.PeerType.USER, title='Admin',
-                                    fetched_at=timezone.now())
-        response = create_ad(self.boss_client, Placement.SEARCH, url='https://t.me/shop_admin')
-        self.assertEqual(response.status_code, 201, response.data)
-        self.assertEqual(response.data['action_type'], 'MESSAGE')
-        ad = Ad.objects.get(pk=response.data['id'])
-        self.assertEqual(make_entry(ad).payload['button_type'], 'USER')
-
-        response = create_ad(self.user_client, Placement.SEARCH, url='https://t.me/shop_admin')
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.data['url'][0], '@shop_admin — не канал и не бот')
-
     def test_patch_cpm_below_minimum(self):
         boss_ad = create_ad(self.boss_client, Placement.SEARCH).data['id']
         response = self.boss_client.patch(f'/api/ads/{boss_ad}/', {'cpm': 5}, format='json')
@@ -383,6 +368,60 @@ class SuperadminLimitsTests(TestCase):
         self.assertEqual((response.status_code, response.data['cpm']), (200, 2))  # 1 × 1,3 → вверх до 2
         response = self.boss_client.patch(f'/api/ads/{boss_ad}/', {'show_channel_picture': False}, format='json')
         self.assertEqual(response.data['cpm'], 1)  # 2 / 1,3 → вниз до 1
+
+
+class UserAccountAdTests(TestCase):
+    """
+    Аккаунт пользователя (t.me/<user>, напр. «напиши админу») рекламирует любой рекламодатель: действие MESSAGE,
+    кнопка USER. Android такую рекламу не рисует — таргетинг «только Android» не пропускаем
+    """
+
+    def setUp(self):
+        self.client = client_for(make_local_user())
+        TelegramPeer.objects.create(username='shop_admin', peer_type=TelegramPeer.PeerType.USER, title='Admin',
+                                    fetched_at=timezone.now())
+
+    def test_advertiser_can_promote_user_account(self):
+        from apps.ads.serving.snapshot import make_entry
+        for placement in Placement:
+            with self.subTest(placement=placement):
+                response = create_ad(self.client, placement, url='https://t.me/shop_admin')
+                self.assertEqual(response.status_code, 201, response.data)
+                self.assertEqual(response.data['action_type'], 'MESSAGE')
+                self.assertEqual(response.data['promoted_peer']['peer_type'], 'USER')
+                ad = Ad.objects.get(pk=response.data['id'])
+                self.assertEqual(make_entry(ad).payload['button_type'], 'USER')
+
+    def test_group_is_not_promotable(self):
+        TelegramPeer.objects.create(username='uz_chat', peer_type=TelegramPeer.PeerType.GROUP,
+                                    fetched_at=timezone.now())
+        response = create_ad(self.client, url='https://t.me/uz_chat')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['url'][0], validators.ERR_NOT_PROMOTABLE.format('uz_chat'))
+
+    def test_android_only_devices_rejected_for_user_account(self):
+        boss = make_local_user('boss')
+        boss.is_superuser = True
+        boss.save(update_fields=['is_superuser'])
+        for client in (self.client, client_for(boss)):  # суперадмину — то же: такая реклама нигде не покажется
+            for devices in (['android'], ['ANDROID']):
+                with self.subTest(superadmin=client is not self.client, devices=devices):
+                    response = create_ad(client, Placement.USERS_CHANNEL_MESSAGE, url='https://t.me/shop_admin',
+                                         targeting={'countries': ['UZ'], 'devices': devices})
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(str(response.data['targeting']['devices']),
+                                     validators.ERR_USER_ACCOUNT_DEVICES)
+
+        for devices in ([], ['android', 'ios'], ['desktop']):
+            with self.subTest(devices=devices):
+                response = create_ad(self.client, Placement.USERS_BOT_BANNER, url='https://t.me/shop_admin',
+                                     targeting={'countries': ['UZ'], 'devices': devices})
+                self.assertEqual(response.status_code, 201, response.data)
+
+        # Канал на «только Android» — как раньше
+        response = create_ad(self.client, Placement.USERS_VIDEO_BANNER,
+                             targeting={'countries': ['UZ'], 'devices': ['android']})
+        self.assertEqual(response.status_code, 201, response.data)
 
 
 @override_settings(**ADGRAM_SETTINGS)

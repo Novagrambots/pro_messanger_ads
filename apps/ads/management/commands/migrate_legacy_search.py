@@ -19,8 +19,7 @@ APPROVED: показы кончились → STOPPED, включён → ACTIVE
 Теги → фразы поиска (4–32 символа, без дублей); spm → cpm (целый, .5 вверх, не меньше 1);
 max_views_per_user (за всё время) → views_per_user_per_day = min(…, 4); ссылка — t.me/<username канала>.
 Объявление, которое может крутиться (ACTIVE / ON_HOLD / IN_REVIEW), переносим только с фразами и с каналом
-или ботом, найденным в Telegram (у суперадмина — и с аккаунтом пользователя, как при создании через API;
-в отчёте такие — отдельной строкой), — и если старый id канала (-100…) совпадает с id канала по username:
+или ботом, найденным в Telegram (у суперадмина — и с аккаунтом пользователя; в отчёте такие — отдельной строкой), — и если старый id канала (-100…) совпадает с id канала по username:
 иначе по ссылке рекламировался бы чужой канал. Не подходит — заказ остаётся как был (в отчёте с причиной).
 У архивных расхождение не мешает — канал просто не привязываем. Старые заказы в чатах не переносим.
 """
@@ -34,7 +33,7 @@ from django.db.models import Exists, F, OuterRef
 from django.utils import timezone
 
 from apps.ads.models import Ad, AdDailyStat, AdPricing, AdStatus, InitialStatus, Placement, default_schedule
-from apps.ads.validators import PROMOTABLE, SUPERADMIN_MAX_QUERIES, SUPERADMIN_PROMOTABLE, promoted_url
+from apps.ads.validators import PROMOTABLE, SUPERADMIN_MAX_QUERIES, promoted_url
 from apps.billing.models import MoneyOperation
 from apps.billing.services import wallet_of
 from apps.chat_ads.models import ChatAdOrder
@@ -54,6 +53,9 @@ PEER_BAD = "kanal Telegram'da topilmadi yoki kanal/bot emas"
 ID_MISMATCH = "eski kanal id'si username'dagi kanalga mos emas (boshqa kanal reklama qilinib qoladi)"
 TELEGRAM_DOWN = 'Telegram javob bermadi'
 CHANNEL_ID_RE = re.compile(r'-100\d{10,13}')
+# Перенос — по правилу, с которым его запускали: аккаунт пользователя — только у заказов суперадмина
+# (через API аккаунт теперь рекламирует любой рекламодатель — validators.PROMOTABLE)
+CHANNEL_OR_BOT = (TelegramPeer.PeerType.CHANNEL, TelegramPeer.PeerType.BOT)
 
 
 def queries_from(tags):
@@ -123,8 +125,8 @@ class Plan:
         if self.skip:
             return
         peer = peers.get(self.username)
-        # Как при создании через API: канал или бот, суперадмину — ещё и аккаунт пользователя
-        allowed = SUPERADMIN_PROMOTABLE if self.order.user.is_superuser else PROMOTABLE
+        # Канал или бот, суперадмину — ещё и аккаунт пользователя (CHANNEL_OR_BOT)
+        allowed = PROMOTABLE if self.order.user.is_superuser else CHANNEL_OR_BOT
         bad = peer is not None and (peer.not_found or peer.peer_type not in allowed)
         # Старый заказ хранил и id, и имя канала. Имя ведёт на другой канал — значит, его набрали неверно:
         # по ссылке t.me/<имя> рекламировался бы чужой канал. У аккаунта id из Telegram неизвестен — не сверяем

@@ -21,8 +21,9 @@ from . import store as S
 from .snapshot import allowed_now
 
 
-USER_ACCOUNT = TelegramPeer.PeerType.USER  # аккаунт пользователя (рекламирует только суперадмин)
-# Клиенты, которые показывают в рекламе только канал и бота (Android: AdsManager.resolvePromoted)
+USER_ACCOUNT = TelegramPeer.PeerType.USER  # аккаунт пользователя
+# Клиенты, которые показывают в рекламе только канал и бота (Android: AdsManager.resolvePromoted).
+# Таргетинг «только эти устройства» для рекламы аккаунта не пропускает validators._users_rules
 NO_USER_ACCOUNT_PLATFORMS = frozenset({'android'})
 
 

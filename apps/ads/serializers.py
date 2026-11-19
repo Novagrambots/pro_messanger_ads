@@ -101,13 +101,14 @@ class AdSerializer(serializers.ModelSerializer):
     clicks = serializers.IntegerField(source='clicks_total', read_only=True)
     actions = serializers.IntegerField(source='actions_total', read_only=True)
     action_type = serializers.ChoiceField(choices=ActionType.choices, read_only=True,
-                                          help_text='JOIN — подписка на канал, START — запуск бота')
+                                          help_text='JOIN — подписка на канал, START — запуск бота, '
+                                                    'MESSAGE — сообщение аккаунту пользователя')
     ctr = serializers.SerializerMethodField(help_text='clicks / views, доля (6 знаков); null — показов нет')
     cvr = serializers.SerializerMethodField(help_text='actions / clicks, доля; null — кликов нет')
     cpc = serializers.SerializerMethodField(help_text='spent / clicks; null — кликов нет')
     cpa = serializers.SerializerMethodField(help_text='spent / actions; null — действий нет')
     targeting_summary = serializers.SerializerMethodField()
-    promoted_peer = TelegramPeerSerializer(read_only=True, help_text='Продвигаемый канал или бот (для превью)')
+    promoted_peer = TelegramPeerSerializer(read_only=True, help_text='Продвигаемый канал, бот или аккаунт пользователя (для превью)')
     media = AdMediaBriefSerializer(read_only=True, allow_null=True)
     pending_revision = serializers.SerializerMethodField(
         help_text='Правка креатива на проверке (пока её не одобрят, крутится прежний вариант)')
@@ -236,8 +237,7 @@ class AdCreateSerializer(serializers.Serializer):
         promoted_peer = None
         if username:
             data['url'] = validators.promoted_url(username)
-            promoted_peer = check('url', lambda: validators.check_promoted_peer(username, batch.resolve,
-                                                                                superadmin=superadmin))
+            promoted_peer = check('url', lambda: validators.check_promoted_peer(username, batch.resolve))
         data['promoted_peer'] = promoted_peer
         if placement == Placement.SEARCH and data['show_channel_picture']:
             errors['show_channel_picture'] = 'В рекламе в поиске фото канала нет'
