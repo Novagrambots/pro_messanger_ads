@@ -174,42 +174,54 @@ class SelectionTests(ServingBase):
         picked = {tokens.decode(self.serve_ad(user_id)['random_id']).ad_id for user_id in range(1, 60)}
         self.assertEqual(picked, {str(first.pk), str(second.pk)})
 
-    def test_android_never_gets_user_account(self):
-        """Android показывает только канал и бота: аккаунт пользователя в его аукционе не участвует"""
-        channel = self.active_ad()
+    def make_user_account_ad(self):
         account = self.active_ad()
         peer = TelegramPeer.objects.create(username='shop_admin', peer_type=TelegramPeer.PeerType.USER,
                                            title='Admin', fetched_at=timezone.now())
         Ad.objects.filter(pk=account.pk).update(promoted_peer=peer, url='https://t.me/shop_admin')
+        return account
+
+    def serve_on(self, platform, app_version=None, user_id=1):
+        body = {'placement': Placement.SEARCH, 'user_id': user_id, 'context': {'query': QUERY}, 'platform': platform}
+        if app_version is not None:
+            body['app_version'] = app_version
+        response = self.client.post('/api/ads/serve/', json.dumps(body), content_type='application/json',
+                                    HTTP_X_API_KEY=API_KEY)
+        self.assertEqual(response.status_code, 200, response.content)
+        return response.json()['ads']
+
+    def test_old_android_never_gets_user_account(self):
+        """Android до 1.4.0 показывает только канал и бота: аккаунт пользователя в его аукционе не участвует"""
+        channel = self.active_ad()
+        account = self.make_user_account_ad()
         self.reload()
 
-        def picked(platform):
+        def picked(platform, app_version=None):
             found = set()
             for user_id in range(1, 60):
-                body = {'placement': Placement.SEARCH, 'user_id': user_id, 'context': {'query': QUERY},
-                        'platform': platform}
-                response = self.client.post('/api/ads/serve/', json.dumps(body), content_type='application/json',
-                                            HTTP_X_API_KEY=API_KEY)
-                self.assertEqual(response.status_code, 200, response.content)
-                ad = response.json()['ads'][0]
+                ad = self.serve_on(platform, app_version, user_id)[0]
                 found.add((tokens.decode(ad['random_id']).ad_id, ad['promoted']['type']))
             return found
 
-        self.assertEqual(picked('android'), {(str(channel.pk), 'CHANNEL')})
-        self.assertEqual(picked('Android'), {(str(channel.pk), 'CHANNEL')})
-        self.assertEqual(picked('ios'), {(str(channel.pk), 'CHANNEL'), (str(account.pk), 'USER')})
+        only_channel = {(str(channel.pk), 'CHANNEL')}
+        both = {(str(channel.pk), 'CHANNEL'), (str(account.pk), 'USER')}
+        for platform, app_version in (('android', None), ('Android', None), ('android', '1.3.9'),
+                                      ('android', '1.3'), ('android', ''), ('android', 'beta')):
+            with self.subTest(platform=platform, app_version=app_version):
+                self.assertEqual(picked(platform, app_version), only_channel)
+        for platform, app_version in (('android', '1.4.0'), ('ANDROID', '1.4'), ('android', '1.10.2 (310)'),
+                                      ('ios', None), ('ios', '1.0.0'), ('desktop', None)):
+            with self.subTest(platform=platform, app_version=app_version):
+                self.assertEqual(picked(platform, app_version), both)
 
-    def test_android_gets_nothing_when_only_user_account(self):
-        """Только аккаунт пользователя — Android получает «рекламы нет», а не пустое место на экране"""
-        account = self.active_ad()
-        peer = TelegramPeer.objects.create(username='shop_admin', peer_type=TelegramPeer.PeerType.USER,
-                                           title='Admin', fetched_at=timezone.now())
-        Ad.objects.filter(pk=account.pk).update(promoted_peer=peer, url='https://t.me/shop_admin')
+    def test_old_android_gets_nothing_when_only_user_account(self):
+        """Только аккаунт пользователя — старый Android получает «рекламы нет», а не ошибку на экране"""
+        account = self.make_user_account_ad()
         self.reload()
-        body = {'placement': Placement.SEARCH, 'user_id': 1, 'context': {'query': QUERY}, 'platform': 'android'}
-        response = self.client.post('/api/ads/serve/', json.dumps(body), content_type='application/json',
-                                    HTTP_X_API_KEY=API_KEY)
-        self.assertEqual(response.json()['ads'], [])
+        self.assertEqual(self.serve_on('android'), [])
+        self.assertEqual(self.serve_on('android', '1.3.9'), [])
+        ad, = self.serve_on('android', '1.4.0')
+        self.assertEqual((tokens.decode(ad['random_id']).ad_id, ad['promoted']['type']), (str(account.pk), 'USER'))
         self.assertIsNotNone(self.serve_ad())  # без platform (и у iOS) — как раньше
 
     def test_views_per_user_per_day(self):
@@ -383,6 +395,31 @@ class SelectionTests(ServingBase):
         with override_settings(ADS_REDIS_URL=REDIS_DOWN), self.assertLogs('apps.ads.serving.views', 'ERROR'):
             self.assertEqual(self.serve().json(), {'ads': [], 'ttl_seconds': settings.ADS_EMPTY_TTL})
             self.assertEqual(self.send(1, self.view(self.token(ad))).status_code, 503)  # клиент пришлёт позже
+
+
+class AppVersionTests(SimpleTestCase):
+    """Версия приложения: с какой Android рисует аккаунт пользователя (selection.skips_user_accounts)"""
+
+    def test_parse(self):
+        cases = {'1.4.0': (1, 4, 0), ' v1.4 ': (1, 4), 'V2': (2,), '1.4.0 (140)': (1, 4, 0),
+                 '1.4.0-beta.2': (1, 4, 0), '1.10': (1, 10), '': None, 'beta': None, '.1.4': None, None: None, 140: None}
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(selection.parse_app_version(value), expected)
+
+    def test_android_from_1_4_0(self):
+        for app_version in (None, '', 'abc', '0.9', '1.3.9', '1.3.99', '1.3'):
+            with self.subTest(app_version=app_version):
+                self.assertTrue(selection.skips_user_accounts('android', app_version))
+        for app_version in ('1.4', '1.4.0', '1.4.0.0', '1.4.1', '1.10.0', '2', 'v1.4.0', '1.4.0 (140)'):
+            with self.subTest(app_version=app_version):
+                self.assertFalse(selection.skips_user_accounts('android', app_version))
+        self.assertTrue(selection.skips_user_accounts(' Android ', '1.3.0'))
+
+    def test_other_platforms_not_limited(self):
+        for platform in (None, '', 'ios', 'iPhone', 'desktop', 'tv', 5):
+            with self.subTest(platform=platform):
+                self.assertFalse(selection.skips_user_accounts(platform, None))
 
 
 @override_settings(**SECRETS, ADS_TOKEN_TTL=3600)

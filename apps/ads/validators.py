@@ -16,8 +16,6 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from apps.ads.models import Placement, USERS_PLACEMENTS
-from apps.ads.serving.audience import DEVICE_ALIASES
-from apps.ads.serving.selection import NO_USER_ACCOUNT_PLATFORMS
 from apps.directories import services as directories
 from apps.directories.models import TelegramPeer
 from apps.directories.telegram import (NotCheckedInTime, TelegramUnavailable, not_bot_error, not_bots,
@@ -27,9 +25,6 @@ from apps.directories.telegram import (NotCheckedInTime, TelegramUnavailable, no
 # Список ещё согласуем с мобильщиками — менять только здесь
 DEVICES = ('ios', 'android', 'desktop')
 POLITICS = ('only', 'exclude')  # показывать только в каналах о политике / не показывать в них
-# Устройства, где реклама аккаунта пользователя не показывается (их клиенты рисуют только канал и бота)
-NO_USER_ACCOUNT_DEVICES = frozenset(DEVICE_ALIASES[platform] for platform in NO_USER_ACCOUNT_PLATFORMS)
-ERR_USER_ACCOUNT_DEVICES = 'Реклама аккаунта пользователя на Android не показывается — добавьте iOS или desktop'
 
 MAX_CHANNELS = 100  # в каждом поле со списком каналов
 MAX_BOTS = 100
@@ -341,7 +336,7 @@ def validate_targeting(placement, data, promoted_peer, resolve_peers, superadmin
     if placement == Placement.CHANNEL_MESSAGE:
         _channel_message_rules(result, promoted_peer)
     elif placement in USERS_PLACEMENTS:
-        _users_rules(result, promoted_peer)
+        _users_rules(result)
     return result
 
 
@@ -399,14 +394,11 @@ def _channel_message_rules(targeting, promoted_peer):
             excluded.append({'username': promoted_peer.username, 'id': promoted_peer.telegram_id})
 
 
-def _users_rules(targeting, promoted_peer):
+def _users_rules(targeting):
     if not targeting['countries']:
         raise serializers.ValidationError({'countries': 'Выберите хотя бы одну страну'})
-    # Не все клиенты рисуют аккаунт пользователя (Android — только канал и бот): выдача им такие объявления
-    # не отдаёт. Если выбраны только такие устройства — объявление не покажется нигде
-    devices = set(targeting['devices'])
-    if promoted_peer and promoted_peer.peer_type == PeerType.USER and devices and devices <= NO_USER_ACCOUNT_DEVICES:
-        raise serializers.ValidationError({'devices': ERR_USER_ACCOUNT_DEVICES})
+    # Аккаунт пользователя на «только Android» — можно: Android с 1.4.0 его рисует, а старым версиям
+    # выдача такие объявления не отдаёт (selection.skips_user_accounts)
     # Локация должна быть в одной из выбранных стран
     location_countries = directories.location_countries()
     wrong = [str(location) for location in targeting['locations']

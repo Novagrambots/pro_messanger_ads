@@ -173,7 +173,7 @@ def serve(request):
             return _error('Слишком много запросов', 429)
         snap = snapshot.current()
         profile = viewer_profile(snap, data, request, history) if slot != Slot.SEARCH else None
-        skip_users = (data.get('platform') or '').lower() in selection.NO_USER_ACCOUNT_PLATFORMS
+        skip_users = selection.skips_user_accounts(data.get('platform'), data.get('app_version'))
         entry = selection.pick(snap, slot, key, viewer, profile=profile, skip_user_accounts=skip_users)
     except (redis.RedisError, DatabaseError):
         # Без Redis выдачи нет: пустой ответ с коротким кэшем на клиенте
