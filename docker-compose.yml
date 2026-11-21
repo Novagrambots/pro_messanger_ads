@@ -1,5 +1,14 @@
 name: 'pro_messanger ads backend'
 
+# Логи контейнеров — json-file с ротацией: не больше 5 файлов по 200 МБ (≈1 ГБ) на контейнер.
+# Без ротации лог nginx за 4 месяца дорос до 59 ГБ, и `docker logs --since` читал его минутами.
+# Применяется только при пересоздании контейнера (docker compose up), не при restart
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "200m"
+    max-file: "5"
+
 services:
   db:
     image: postgres:15-alpine
@@ -13,6 +22,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
+    logging: *logging
     healthcheck: # Проверка готовности базы
       test: [ "CMD-SHELL", "pg_isready -U ${DATABASES_USER} -d ${DATABASES_NAME}" ]
       interval: 5s
@@ -23,6 +33,7 @@ services:
     image: redis:alpine
     container_name: channel_redis
     restart: unless-stopped
+    logging: *logging
 
   # Redis выдачи объявлений v2: бюджеты, счётчики показов, несброшенные траты (деньги!).
   # AOF раз в секунду — после рестарта данные на месте; noeviction — при переполнении памяти
@@ -36,6 +47,7 @@ services:
     volumes:
       - redis_ads_data:/data
     restart: unless-stopped
+    logging: *logging
 
   web:
     build: .
@@ -73,6 +85,7 @@ services:
       redis_ads:
         condition: service_started
     restart: unless-stopped
+    logging: *logging
 
   # Горячий путь выдачи объявлений v2 (/api/ads/serve|events|report/) — отдельно от web, чтобы
   # пик запросов рекламы не съедал воркеры кабинета и модерации. Тот же образ, только эти URL.
@@ -105,6 +118,7 @@ services:
       - redis_ads
       - web  # миграции применяет web
     restart: unless-stopped
+    logging: *logging
 
   celery_worker:
     build: .
@@ -137,6 +151,7 @@ services:
       - redis_ads
       - web # Чтобы миграции точно прошли до запуска воркера
     restart: unless-stopped
+    logging: *logging
 
   # Сброс показов объявлений v2 из Redis в Postgres (beat каждые 5 с) — своя очередь и свой
   # воркер, чтобы перекодирование видео и прочие задачи его не задерживали. Один процесс:
@@ -163,6 +178,7 @@ services:
       - redis_ads
       - web # миграции применяет web
     restart: unless-stopped
+    logging: *logging
 
   celery_beat:
     build: .
@@ -180,6 +196,7 @@ services:
       - db
       - redis
     restart: unless-stopped
+    logging: *logging
 
   nginx:
     image: nginx:alpine
@@ -196,6 +213,7 @@ services:
       - web
       - serving
     restart: unless-stopped
+    logging: *logging
 
 volumes:
   postgres_data:
