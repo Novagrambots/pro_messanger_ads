@@ -2,7 +2,7 @@ from django.contrib import admin, messages
 from django.db import transaction
 
 from apps.ads.models import (Ad, AdDailyStat, AdDecision, AdMedia, AdPricing, AdReport, AdRevision,
-                             AdStateError)
+                             AdStateError, LabelStyle)
 from apps.ads.serving.store import ServingUnavailable
 
 
@@ -45,12 +45,13 @@ class AdAdmin(admin.ModelAdmin):
     параллельно меняет выдача. Деньги и статусы — только методами модели под локом.
     Полноценный API модераторов (с причиной отказа) — этап 4.
     """
-    list_display = ('title', 'user', 'placement', 'status', 'cpm', 'budget', 'spent', 'refunded', 'created_at')
-    list_filter = ('status', 'placement')
+    list_display = ('title', 'user', 'placement', 'status', 'label_style', 'cpm', 'budget', 'spent', 'refunded',
+                    'created_at')
+    list_filter = ('status', 'placement', 'label_style')
     search_fields = ('title', 'url', 'user__username', 'user__adgram_username')
     list_select_related = ('user',)
     list_per_page = 30
-    actions = ['approve_ads', 'decline_ads', 'block_ads']
+    actions = ['approve_ads', 'decline_ads', 'block_ads', 'label_novagram', 'label_plain']
     inlines = [AdRevisionInline, AdDecisionInline, AdDailyStatInline]
 
     def has_add_permission(self, request):
@@ -94,6 +95,27 @@ class AdAdmin(admin.ModelAdmin):
     @admin.action(description='Заблокировать (остаток вернётся)', permissions=['view'])
     def block_ads(self, request, queryset):
         self._apply(request, queryset, 'block', 'Заблокировано', reason='Заблокировано через админку')
+
+    def _set_label_style(self, request, queryset, label_style):
+        """Подпись — тоже под локом и через модель: сохранение повышает версию снимка выдачи"""
+        done = skipped = 0
+        for pk in queryset.values_list('pk', flat=True):
+            try:
+                with transaction.atomic():
+                    Ad.objects.select_for_update().get(pk=pk).set_label_style(label_style)
+                done += 1
+            except AdStateError:
+                skipped += 1
+        self.message_user(request, f'Подпись «{label_style.label}»: {done}. Пропущено (удалены): {skipped}',
+                          level=messages.WARNING if skipped else messages.SUCCESS)
+
+    @admin.action(description='Подпись: «ad by Novagram»', permissions=['view'])
+    def label_novagram(self, request, queryset):
+        self._set_label_style(request, queryset, LabelStyle.NOVAGRAM)
+
+    @admin.action(description='Подпись: просто «Реклама»', permissions=['view'])
+    def label_plain(self, request, queryset):
+        self._set_label_style(request, queryset, LabelStyle.PLAIN)
 
 
 @admin.register(AdPricing)

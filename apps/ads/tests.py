@@ -14,7 +14,7 @@ from rest_framework.test import APIClient
 
 from apps.account.services import create_user_with_balance
 from apps.ads import validators
-from apps.ads.models import Ad, AdPricing, AdStateError, AdStatus, Placement
+from apps.ads.models import Ad, AdPricing, AdStateError, AdStatus, LabelStyle, Placement
 from apps.ads.validators import (ERR_CHANNELS_WITH_LANGUAGES, ERR_CHANNELS_WITH_TOPICS,
                                  ERR_TOPICS_WITHOUT_LANGUAGE)
 from apps.billing.adgram_client import OperationResult
@@ -411,6 +411,85 @@ class UserAccountAdTests(TestCase):
         response = create_ad(self.client, Placement.USERS_VIDEO_BANNER,
                              targeting={'countries': ['UZ'], 'devices': ['android']})
         self.assertEqual(response.status_code, 201, response.data)
+
+
+@patch('apps.notifications.services._enqueue_push')
+class LabelStyleTests(TestCase):
+    """
+    Подпись объявления: NOVAGRAM («ad by Novagram», по умолчанию) или PLAIN (просто «Реклама»).
+    PLAIN ставит только модератор / суперадмин; меняется сразу, без модерации
+    """
+
+    def setUp(self):
+        self.boss = make_local_user('boss')
+        self.boss.is_superuser = True
+        self.boss.save(update_fields=['is_superuser'])
+        self.boss_client = client_for(self.boss)
+        self.moderator = make_local_user('moder')
+        self.moderator.role = User.Role.MODERATOR
+        self.moderator.save(update_fields=['role'])
+        self.user_client = client_for(make_local_user('adv'))
+
+    def test_default_is_novagram(self, _push):
+        response = create_ad(self.user_client)
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['label_style'], LabelStyle.NOVAGRAM)
+        self.assertEqual(Ad.objects.get(pk=response.data['id']).label_style, LabelStyle.NOVAGRAM)
+
+    def test_superadmin_and_moderator_create_plain(self, _push):
+        for client in (self.boss_client, client_for(self.moderator)):
+            response = create_ad(client, label_style='PLAIN')
+            self.assertEqual(response.status_code, 201, response.data)
+            self.assertEqual(response.data['label_style'], LabelStyle.PLAIN)
+            self.assertEqual(Ad.objects.get(pk=response.data['id']).label_style, LabelStyle.PLAIN)
+
+    def test_advertiser_cannot_create_plain(self, _push):
+        response = create_ad(self.user_client, label_style='PLAIN')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['label_style'][0], validators.ERR_LABEL_STYLE_ADMIN_ONLY)
+        self.assertFalse(Ad.objects.exists())
+        # Явное NOVAGRAM — можно (то же, что по умолчанию)
+        self.assertEqual(create_ad(self.user_client, label_style='NOVAGRAM').status_code, 201)
+
+    def test_unknown_value(self, _push):
+        response = create_ad(self.boss_client, label_style='TELEGRAM')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('label_style', response.data)
+
+    def test_superadmin_patches_active_ad_without_moderation(self, _push):
+        ad_id = create_ad(self.boss_client).data['id']
+        self.assertEqual(Ad.objects.get(pk=ad_id).status, AdStatus.ACTIVE)  # суперадмин — сразу одобрено
+
+        response = self.boss_client.patch(f'/api/ads/{ad_id}/', {'label_style': 'PLAIN'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual((response.data['label_style'], response.data['status'], response.data['pending_revision']),
+                         (LabelStyle.PLAIN, AdStatus.ACTIVE, None))
+        response = self.boss_client.patch(f'/api/ads/{ad_id}/', {'label_style': 'NOVAGRAM'}, format='json')
+        self.assertEqual(response.data['label_style'], LabelStyle.NOVAGRAM)
+
+    def test_advertiser_cannot_patch_label(self, _push):
+        ad_id = create_ad(self.user_client).data['id']
+        response = self.user_client.patch(f'/api/ads/{ad_id}/', {'label_style': 'PLAIN'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['label_style'][0], validators.ERR_LABEL_STYLE_ADMIN_ONLY)
+        self.assertEqual(Ad.objects.get(pk=ad_id).label_style, LabelStyle.NOVAGRAM)
+
+        # Подпись, которую поставил админ, рекламодатель не снимает, но может прислать её же (форма шлёт всё)
+        Ad.objects.filter(pk=ad_id).update(label_style=LabelStyle.PLAIN)
+        response = self.user_client.patch(f'/api/ads/{ad_id}/', {'label_style': 'NOVAGRAM'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        response = self.user_client.patch(f'/api/ads/{ad_id}/', {'label_style': 'PLAIN', 'title': 'Новое'},
+                                          format='json')
+        self.assertEqual((response.status_code, response.data['label_style']), (200, LabelStyle.PLAIN))
+
+    def test_serve_payload_has_label_style(self, _push):
+        from apps.ads.serving.snapshot import make_entry
+        plain = Ad.objects.get(pk=create_ad(self.boss_client, label_style='PLAIN').data['id'])
+        default = Ad.objects.get(pk=create_ad(self.user_client).data['id'])
+        self.assertEqual((make_entry(plain).payload['label_style'], make_entry(plain).payload['label']),
+                         ('PLAIN', 'Ad'))
+        self.assertEqual((make_entry(default).payload['label_style'], make_entry(default).payload['label']),
+                         ('NOVAGRAM', 'Ad'))
 
 
 @override_settings(**ADGRAM_SETTINGS)

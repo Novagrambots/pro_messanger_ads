@@ -73,7 +73,11 @@ AD = {
             },
         },
         'other_info': {'type': 'string'},
-        'label': {'type': 'string', 'enum': ['Ad']},
+        'label': {'type': 'string', 'enum': ['Ad'], 'description': 'Всегда «Ad» — для старых клиентов'},
+        'label_style': {'type': 'string', 'enum': ['NOVAGRAM', 'PLAIN'],
+                        'description': 'Подпись объявления: NOVAGRAM — «ad by Novagram», PLAIN — просто «Реклама», '
+                                       'как у рекламы самого Telegram. Поля нет или значение незнакомое — клиент '
+                                       'показывает «ad by Novagram»'},
         'min_display_duration': {'type': 'integer', 'description': 'Только VIDEO: закрыть можно через, с'},
         'max_display_duration': {'type': 'integer', 'description': 'Только VIDEO: баннер скрывается через, с'},
     },

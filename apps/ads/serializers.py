@@ -7,7 +7,7 @@ from rest_framework import serializers
 
 from apps.ads import stats, validators
 from apps.ads.models import (MEDIA_PLACEMENTS, TABLE_COLUMNS, ActionType, Ad, AdDraft, AdMedia, AdPricing,
-                             AdRevision, AdStateError, InitialStatus, Placement, default_schedule)
+                             AdRevision, AdStateError, InitialStatus, LabelStyle, Placement, default_schedule)
 from apps.billing.models import MoneyOperation
 from apps.billing.services import charge, check_budget, format_money
 from apps.directories.serializers import TelegramPeerSerializer
@@ -77,6 +77,8 @@ def resolve_media(user, media_id, placement):
 
 
 ERR_MEDIA_WITH_PICTURE = 'Фото канала не показывается вместе с медиа — уберите одно из двух'
+LABEL_STYLE_HELP = ('Подпись в приложении: NOVAGRAM — «ad by Novagram», PLAIN — просто «Реклама», как у Telegram. '
+                    'Выбирает только модератор / суперадмин; меняется сразу, без модерации')
 
 
 TARGETING_SUMMARY = {
@@ -122,7 +124,7 @@ class AdSerializer(serializers.ModelSerializer):
         model = Ad
         fields = [
             'id', 'placement', 'ad_format', 'title', 'text', 'url', 'promoted_peer', 'show_channel_picture',
-            'other_info', 'media',
+            'other_info', 'media', 'label_style',
             'cpm', 'budget', 'spent', 'refunded', 'remaining_budget', 'daily_limit', 'views_per_user_per_day',
             'status', 'initial_status', 'start_date', 'end_date', 'schedule', 'targeting', 'targeting_summary',
             'views', 'opened_video', 'clicks', 'actions', 'action_type', 'ctr', 'cvr', 'cpc', 'cpa',
@@ -187,6 +189,8 @@ class AdCreateSerializer(serializers.Serializer):
     other_info = serializers.CharField(required=False, allow_blank=True, default='', max_length=255)
     media = serializers.UUIDField(required=False, allow_null=True, default=None,
                                   help_text='id загруженного медиа (READY); только у сообщения в канале')
+    label_style = serializers.ChoiceField(choices=LabelStyle.choices, required=False, default=LabelStyle.NOVAGRAM,
+                                          help_text=LABEL_STYLE_HELP)
     cpm = serializers.IntegerField(min_value=1, help_text='Цена 1000 показов, целые сумы')
     budget = serializers.DecimalField(max_digits=19, decimal_places=2, min_value=Decimal('0.01'),
                                       help_text='У пользователя AdGram — целые сумы')
@@ -209,6 +213,9 @@ class AdCreateSerializer(serializers.Serializer):
 
     def validate_budget(self, value):
         return check_budget(self.context['request'].user, value)
+
+    def validate_label_style(self, value):
+        return validators.check_label_style(self.context['request'].user, value)
 
     def validate_start_date(self, value):
         return validators.check_date(value)
@@ -291,7 +298,7 @@ class AdCreateSerializer(serializers.Serializer):
 # Что владелец может менять: сразу (настройки и title) или через модерацию (креатив).
 # Остальное отдаёт 400 с причиной
 SETTINGS_FIELDS = {'title', 'cpm', 'daily_limit', 'views_per_user_per_day', 'status', 'start_date', 'end_date',
-                   'schedule'}
+                   'schedule', 'label_style'}
 EDITABLE_FIELDS = SETTINGS_FIELDS | set(AdRevision.CREATIVE_FIELDS)
 FORBIDDEN_FIELD_MESSAGES = {
     'targeting': 'Таргетинг после создания не меняется',
@@ -321,6 +328,7 @@ class AdUpdateSerializer(serializers.Serializer):
     start_date = serializers.DateTimeField(required=False, allow_null=True)
     end_date = serializers.DateTimeField(required=False, allow_null=True)
     schedule = serializers.JSONField(required=False)
+    label_style = serializers.ChoiceField(choices=LabelStyle.choices, required=False, help_text=LABEL_STYLE_HELP)
 
     def to_internal_value(self, data):
         if isinstance(data, dict):
@@ -349,6 +357,9 @@ class AdUpdateSerializer(serializers.Serializer):
 
     def validate_media(self, value):
         return resolve_media(self.context['request'].user, value, self.instance.placement)
+
+    def validate_label_style(self, value):
+        return validators.check_label_style(self.context['request'].user, value, self.instance.label_style)
 
     def validate(self, data):
         ad = self.instance
