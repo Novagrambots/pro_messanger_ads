@@ -2,7 +2,7 @@ from django.contrib import admin, messages
 from django.db import transaction
 
 from apps.ads.models import (Ad, AdDailyStat, AdDecision, AdMedia, AdPricing, AdReport, AdRevision,
-                             AdStateError, LabelStyle)
+                             AdStateError, LabelStyle, ServeTrafficHour)
 from apps.ads.serving.store import ServingUnavailable
 
 
@@ -197,3 +197,21 @@ class AdReportAdmin(admin.ModelAdmin):
 
     def has_view_permission(self, request, obj=None):
         return request.user.is_superuser
+
+
+@admin.register(ServeTrafficHour)
+class ServeTrafficHourAdmin(admin.ModelAdmin):
+    """Трафик выдачи по часам и клиентам — только просмотр (пишет задача мониторинга)"""
+    list_display = ('hour', 'platform', 'user_agent', 'app_version', 'requests', 'filled', 'fill_rate_percent')
+    list_filter = ('platform', 'user_agent', 'app_version')
+    date_hierarchy = 'hour'
+
+    @admin.display(description='Fill rate')
+    def fill_rate_percent(self, obj):
+        return f'{obj.fill_rate:.0%}'
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False

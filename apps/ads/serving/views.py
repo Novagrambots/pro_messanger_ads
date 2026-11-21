@@ -20,7 +20,7 @@ from apps.common.permissions import has_server_api_key
 from apps.directories.telegram import normalize_username
 
 from . import events as ad_events
-from . import audience, geo, selection, snapshot
+from . import audience, geo, monitor, selection, snapshot
 from . import store as S
 from . import tokens
 from .selection import Slot
@@ -179,6 +179,10 @@ def serve(request):
         # Без Redis выдачи нет: пустой ответ с коротким кэшем на клиенте
         _log_outage('Выдача объявлений недоступна')
         return JsonResponse({'ads': [], 'ttl_seconds': settings.ADS_EMPTY_TTL})
+
+    # Мониторинг трафика по клиенту (платформа · версия · User-Agent): запрос и нашлось ли объявление
+    monitor.count_serve(monitor.client_of(data.get('platform'), data.get('app_version'),
+                                          request.META.get('HTTP_USER_AGENT')), filled=entry is not None)
 
     video = snap.world.video if slot == Slot.VIDEO else None
     ads = []

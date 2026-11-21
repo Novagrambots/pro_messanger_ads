@@ -399,3 +399,16 @@ ADS_SNAPSHOT_THREAD = not TESTING and os.getenv('ADS_SNAPSHOT_THREAD', 'True') =
 # Мост старых версий приложения (apps/ads/serving/legacy.py): старые URL выдачи (поиск, чаты, клики)
 # показывают и объявления v2 — общие бюджет, частота и статистика. False — старые URL как раньше
 ADS_LEGACY_BRIDGE = os.getenv('ADS_LEGACY_BRIDGE', 'True') == 'True'
+
+# Мониторинг трафика выдачи (apps/ads/monitoring.py): запросы serve и fill rate по клиенту
+# (платформа · версия · User-Agent) за час. Резкое падение трафика клиента → алерт, в 09:10 — отчёт за сутки.
+# Бот и чат Telegram не заданы → сообщения только в лог (в тестах — всегда)
+MONITOR_TELEGRAM_BOT_TOKEN = '' if TESTING else os.getenv('MONITOR_TELEGRAM_BOT_TOKEN', '')
+MONITOR_TELEGRAM_CHAT_ID = '' if TESTING else os.getenv('MONITOR_TELEGRAM_CHAT_ID', '')
+MONITOR_LABEL = os.getenv('MONITOR_LABEL', 'prod')  # в начале сообщений: какой это сервер
+# «Обычный» трафик клиента — медиана того же часа за MONITOR_BASELINE_DAYS прошлых суток (нет данных — 0).
+# Проверяем только клиентов, у которых он не меньше MONITOR_MIN_HOURLY запросов в час (рабочие сборки);
+# алерт — если за час пришло меньше MONITOR_DROP_RATIO от обычного (0.3 → падение больше чем на 70%)
+MONITOR_BASELINE_DAYS = int(os.getenv('MONITOR_BASELINE_DAYS', '3'))
+MONITOR_MIN_HOURLY = int(os.getenv('MONITOR_MIN_HOURLY', '200'))
+MONITOR_DROP_RATIO = float(os.getenv('MONITOR_DROP_RATIO', '0.3'))
