@@ -15,7 +15,7 @@ from django.conf import settings
 from django.utils import timezone
 from rest_framework import serializers
 
-from apps.ads.models import Placement, USERS_PLACEMENTS
+from apps.ads.models import LabelStyle, Placement, USERS_PLACEMENTS
 from apps.directories import services as directories
 from apps.directories.models import TelegramPeer
 from apps.directories.telegram import (NotCheckedInTime, TelegramUnavailable, not_bot_error, not_bots,
@@ -90,6 +90,19 @@ def check_promoted_peer(username, resolve_peers):
 
 def promoted_url(username):
     return f'https://t.me/{username}'
+
+
+ERR_LABEL_STYLE_ADMIN_ONLY = 'Подпись объявления выбирает только администратор'
+
+
+def check_label_style(user, value, current=LabelStyle.NOVAGRAM):
+    """
+    Подпись («ad by Novagram» / просто «Реклама») выбирает только модератор или суперадмин.
+    Остальные могут прислать лишь текущее значение (у нового объявления — NOVAGRAM), иначе 400
+    """
+    if value != current and not user.is_moderator:
+        raise serializers.ValidationError(ERR_LABEL_STYLE_ADMIN_ONLY)
+    return value
 
 
 def check_text(placement, text):

@@ -11,7 +11,7 @@ from django.db import IntegrityError, connection, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 
 from apps.account.services import create_user_with_balance
-from apps.ads.models import Ad, AdDecision, AdReport, AdRevision, AdStateError, AdStatus, Placement
+from apps.ads.models import Ad, AdDecision, AdReport, AdRevision, AdStateError, AdStatus, LabelStyle, Placement
 from apps.ads.tests import (ADGRAM_SETTINGS, SPORTS, client_for, create_ad, make_local_user,  # noqa: F401
                             setUpModule, tearDownModule)
 from apps.billing.adgram_client import OperationResult
@@ -490,3 +490,42 @@ class DisplayNameTests(ModerationBase):
                                           format='json')
         self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual((response.data['created_by'], response.data['created_by_name']), ('boss', 'boss'))
+
+
+class LabelStyleModerationTests(ModerationBase):
+    """PATCH /api/moderation/ads/<id>/: модератор / суперадмин меняет подпись любого объявления сразу, без модерации"""
+
+    def moderate_label(self, ad, data, client=None):
+        return (client or self.mod_client).patch(f'/api/moderation/ads/{ad.pk}/', data, format='json')
+
+    def test_moderator_and_superadmin_change_active_ad(self):
+        ad = self.approved_ad()
+        response = self.moderate_label(ad, {'label_style': 'PLAIN'})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual((response.data['label_style'], response.data['status'], response.data['pending_revision']),
+                         (LabelStyle.PLAIN, AdStatus.ACTIVE, None))
+        ad = self.refresh(ad)
+        self.assertEqual((ad.label_style, ad.status), (LabelStyle.PLAIN, AdStatus.ACTIVE))
+        self.assertFalse(ad.revisions.exists())
+
+        response = self.moderate_label(ad, {'label_style': 'NOVAGRAM'}, client=client_for(self.boss))
+        self.assertEqual((response.status_code, self.refresh(ad).label_style), (200, LabelStyle.NOVAGRAM))
+
+    def test_owner_is_forbidden(self):
+        ad = self.approved_ad()
+        self.assertEqual(self.moderate_label(ad, {'label_style': 'PLAIN'}, client=self.owner_client).status_code, 403)
+        self.assertEqual(self.refresh(ad).label_style, LabelStyle.NOVAGRAM)
+
+    def test_only_label_style_and_valid_value(self):
+        ad = self.approved_ad()
+        response = self.moderate_label(ad, {'label_style': 'PLAIN', 'cpm': 1})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('cpm', response.data)
+        self.assertEqual(self.moderate_label(ad, {'label_style': 'Ad'}).status_code, 400)
+        self.assertEqual(self.moderate_label(ad, {}).status_code, 400)
+        self.assertEqual(self.refresh(ad).label_style, LabelStyle.NOVAGRAM)
+
+    def test_deleted_ad(self):
+        ad = self.approved_ad()
+        Ad.objects.filter(pk=ad.pk).update(status=AdStatus.DELETED)
+        self.assertEqual(self.moderate_label(ad, {'label_style': 'PLAIN'}).status_code, 409)

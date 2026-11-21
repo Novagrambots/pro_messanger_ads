@@ -302,7 +302,8 @@ class SelectionTests(ServingBase):
         self.assertEqual(data['ttl_seconds'], settings.ADS_CACHE_TTL)
         item = data['ads'][0]
         self.assertEqual(set(item), {'random_id', 'placement', 'text', 'url', 'promoted', 'button_type', 'media',
-                                     'other_info', 'label'})
+                                     'other_info', 'label', 'label_style'})
+        self.assertEqual(item['label_style'], 'NOVAGRAM')  # по умолчанию — «ad by Novagram»
         self.assertEqual(item['promoted'], {
             'username': 'kunuz', 'title': 'kunuz', 'telegram_id': KUNUZ_ID, 'type': 'CHANNEL',
             'avatar_url': 'http://testserver/media/tg_avatars/kunuz_abcd1234.jpg',
@@ -793,6 +794,21 @@ class HotPathTests(ServingBase):
         self.assertIsNot(snapshot._current, old)
         self.assertEqual(snapshot._current.ads[str(ad.pk)].price, 4000)
 
+    def test_label_style_change_reaches_serve_at_once(self):
+        """Модератор сменил подпись активного объявления — выдача отдаёт её после перечитывания снимка, без модерации"""
+        ad = self.active_ad()
+        self.reload()
+        self.assertEqual(self.serve_ad()['label_style'], 'NOVAGRAM')
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.mod_client.patch(f'/api/moderation/ads/{ad.pk}/', {'label_style': 'PLAIN'},
+                                             format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        snapshot.refresh_if_needed()  # версия снимка выросла — перечитываем
+        item = self.serve_ad(user_id=2)
+        self.assertEqual((item['label_style'], item['label']), ('PLAIN', 'Ad'))
+        self.assertEqual(self.fresh(ad).status, AdStatus.ACTIVE)
+
     def test_reload_every_30_seconds(self):
         self.active_ad()
         old = self.reload()
@@ -1189,7 +1205,7 @@ class BotPlacementTests(ServingBase):
         self.reload()
         item = self.serve_bot('weatherbot').json()['ads'][0]
         self.assertEqual(set(item), {'random_id', 'placement', 'text', 'url', 'promoted', 'button_type', 'media',
-                                     'other_info', 'label'})
+                                     'other_info', 'label', 'label_style'})
         self.assertEqual((item['placement'], item['text'], item['url'], item['button_type'], item['media'],
                           item['label']), (Placement.BOT, plain.text, plain.url, 'CHANNEL', None, 'Ad'))
         self.assertIsNone(item['promoted']['avatar_url'])  # без «фото канала» — без аватара

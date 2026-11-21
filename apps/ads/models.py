@@ -60,6 +60,12 @@ class ActionType(models.TextChoices):
     MESSAGE = 'MESSAGE', 'Сообщение пользователю'  # реклама аккаунта пользователя
 
 
+class LabelStyle(models.TextChoices):
+    """Подпись объявления в приложении: «ad by Novagram» или просто «Реклама», как у рекламы самого Telegram"""
+    NOVAGRAM = 'NOVAGRAM', 'ad by Novagram'
+    PLAIN = 'PLAIN', 'Реклама (как у Telegram)'
+
+
 class AdStateError(Exception):
     """Недопустимый переход статуса или действие с объявлением — вьюха отвечает 400"""
 
@@ -249,6 +255,11 @@ class Ad(models.Model):
     # Фото или видео (только у сообщения в канале); меняется через ревизию, как остальной креатив
     media = models.ForeignKey(AdMedia, on_delete=models.PROTECT, null=True, blank=True, related_name='ads',
                               verbose_name='Медиа')
+    # Подпись в приложении. Выбирает только модератор / суперадмин (validators.check_label_style);
+    # меняется сразу, без модерации, — выдача подхватывает со следующим снимком.
+    # db_default — чтобы код без этого поля (откат) мог создавать объявления
+    label_style = models.CharField('Подпись', max_length=10, choices=LabelStyle.choices,
+                                   default=LabelStyle.NOVAGRAM, db_default=LabelStyle.NOVAGRAM)
 
     # Деньги и ставка
     cpm = models.PositiveIntegerField('CPM, сум', help_text='Цена 1000 показов, целые сумы')
@@ -548,12 +559,23 @@ class Ad(models.Model):
                 self.start_date = None  # дата старта имеет смысл только на паузе
 
         for field in ('title', 'cpm', 'daily_limit', 'views_per_user_per_day', 'start_date', 'end_date',
-                      'schedule'):
+                      'schedule', 'label_style'):
             if field in changes:
                 setattr(self, field, changes[field])
 
         self.check_dates()
         self.save()
+
+    def set_label_style(self, label_style):
+        """
+        Подпись меняет модератор / суперадмин в любом статусе, кроме удалённого, — без модерации.
+        Сохранение повышает версию снимка выдачи: новая подпись уходит в приложение сразу после коммита
+        """
+        if self.status == AdStatus.DELETED:
+            raise AdStateError('Объявление удалено')
+        if label_style != self.label_style:
+            self.label_style = label_style
+            self.save(update_fields=['label_style', 'updated_at'])
 
     def check_dates(self):
         """Дата старта — только для объявления на паузе; окончание — позже старта"""

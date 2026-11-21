@@ -164,7 +164,8 @@ def make_entry(ad, world=None):
         'button_type': promoted['type'],  # CHANNEL / BOT / USER (аккаунт пользователя); текст переводит клиент
         'media': _media(ad),
         'other_info': ad.other_info,
-        'label': 'Ad',
+        'label': 'Ad',  # прежнее поле — для старых клиентов
+        'label_style': ad.label_style,  # NOVAGRAM — «ad by Novagram», PLAIN — просто «Реклама»
     }
     return AdEntry(
         id=str(ad.pk),

@@ -19,7 +19,7 @@ from apps.common.permissions import IsModerator
 from apps.common.schema import ERROR_RESPONSE
 
 from .ad_serializers import (AdReportGroupSerializer, ModerationAdDetailSerializer, ModerationAdSerializer,
-                             ModerationRevisionSerializer)
+                             ModerationAdUpdateSerializer, ModerationRevisionSerializer)
 from .serializers import ModerationReasonSerializer
 
 DECISION_ERROR_RESPONSES = {
@@ -90,11 +90,29 @@ class AllAdsListView(generics.ListAPIView):
 
 
 class ModerationAdDetailView(generics.RetrieveAPIView):
-    """Полная карточка: креатив, таргетинг, владелец, бюджет, правки и история решений"""
+    """
+    Полная карточка: креатив, таргетинг, владелец, бюджет, правки и история решений.
+    PATCH — подпись (label_style) любого объявления, сразу и без модерации
+    """
     serializer_class = ModerationAdDetailSerializer
     permission_classes = [IsModerator]
     # Удалённые тоже открываются — чтобы ссылка из уведомления не вела в 404
     queryset = Ad.objects.select_related('user').prefetch_related('revisions', 'decisions__moderator')
+
+    @extend_schema(request=ModerationAdUpdateSerializer, responses={
+        200: ModerationAdDetailSerializer, 404: ERROR_RESPONSE,
+        409: ERROR_RESPONSE,  # объявление удалено
+    })
+    def patch(self, request, pk):
+        serializer = ModerationAdUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                ad = get_object_or_404(Ad.objects.select_for_update(), pk=pk)
+                ad.set_label_style(serializer.validated_data['label_style'])
+        except AdStateError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(self.get_serializer(self.get_object()).data)
 
 
 class BaseAdDecisionView(APIView):

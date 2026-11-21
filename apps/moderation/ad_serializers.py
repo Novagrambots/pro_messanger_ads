@@ -3,8 +3,8 @@ from collections import Counter
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from apps.ads.models import Ad, AdDecision, AdReport, AdRevision
-from apps.ads.serializers import AdMediaBriefSerializer, AdRevisionSerializer, AdSerializer
+from apps.ads.models import Ad, AdDecision, AdReport, AdRevision, LabelStyle
+from apps.ads.serializers import LABEL_STYLE_HELP, AdMediaBriefSerializer, AdRevisionSerializer, AdSerializer
 
 
 class AdOwnerSerializer(serializers.Serializer):
@@ -55,6 +55,18 @@ class ModerationAdDetailSerializer(ModerationAdSerializer):
     class Meta(ModerationAdSerializer.Meta):
         fields = ModerationAdSerializer.Meta.fields + ['revisions', 'decisions']
         read_only_fields = fields
+
+
+class ModerationAdUpdateSerializer(serializers.Serializer):
+    """Что модератор / суперадмин меняет в любом объявлении сам, без модерации: пока — только подпись"""
+    label_style = serializers.ChoiceField(choices=LabelStyle.choices, help_text=LABEL_STYLE_HELP)
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            unknown = {key: 'Здесь меняется только label_style' for key in data if key not in self.fields}
+            if unknown:
+                raise serializers.ValidationError(unknown)
+        return super().to_internal_value(data)
 
 
 class CreativeSerializer(serializers.Serializer):
