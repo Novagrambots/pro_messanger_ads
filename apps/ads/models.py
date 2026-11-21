@@ -922,3 +922,45 @@ class AdShare(models.Model):
 
     def __str__(self):
         return f'{self.ad_id} → {self.user_id}'
+
+
+PLATFORM_NAMES = {'ios': 'iOS', 'android': 'Android', 'desktop': 'Desktop'}
+
+
+class ServeTrafficHour(models.Model):
+    """
+    Трафик выдачи за час по клиенту (мониторинг DEV-77): запросы /api/ads/serve/ и сколько из них получили
+    объявление. Клиент — платформа · версия приложения · продукт из User-Agent; '-' — части нет.
+    Пишет только задача monitor_serve_traffic (из хеша часа в Redis выдачи, apps/ads/serving/monitor.py)
+    """
+    hour = models.DateTimeField('Час', help_text='Начало часа (по Ташкенту)')
+    platform = models.CharField('Платформа', max_length=16)
+    app_version = models.CharField('Версия приложения', max_length=24)
+    user_agent = models.CharField('User-Agent', max_length=64, help_text='Первый продукт: Novagram/89, okhttp/3.14.9')
+    requests = models.PositiveIntegerField('Запросы', default=0)
+    filled = models.PositiveIntegerField('С объявлением', default=0)
+
+    class Meta:
+        verbose_name = 'Трафик выдачи за час'
+        verbose_name_plural = 'Трафик выдачи по часам'
+        ordering = ['-hour', '-requests']
+        constraints = [models.UniqueConstraint(fields=['hour', 'platform', 'app_version', 'user_agent'],
+                                               name='ads_serve_traffic_hour_unique')]
+
+    @property
+    def client(self):
+        return self.platform, self.app_version, self.user_agent
+
+    @property
+    def fill_rate(self):
+        return self.filled / self.requests if self.requests else 0.0
+
+    def __str__(self):
+        return f'{self.hour:%Y-%m-%d %H}:00 {client_label(self.client)}: {self.requests}'
+
+
+def client_label(client):
+    """('ios', '1.2', 'Novagram/89') → «iOS · Novagram/89 · 1.2»: платформы нет — «?», прочие пустые части пропускаем"""
+    platform, version, product = client
+    parts = [PLATFORM_NAMES.get(platform, '?')] + [part for part in (product, version) if part != '-']
+    return ' · '.join(parts)

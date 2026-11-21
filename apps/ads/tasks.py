@@ -75,3 +75,17 @@ def update_geoip():
     """Раз в месяц: свежая гео-база DB-IP Lite City (файл подменяется атомарно, процессы подхватят сами)"""
     from apps.ads.serving.geo import update_database
     update_database()
+
+
+@app.task(ignore_result=True)
+def monitor_serve_traffic():
+    """Раз в час: трафик выдачи по клиентам из Redis → Postgres; резкое падение у клиента → Telegram"""
+    from apps.ads.monitoring import run_hourly
+    run_hourly()
+
+
+@app.task(ignore_result=True)
+def report_serve_traffic():
+    """Раз в сутки: отчёт за вчера в Telegram — запросы serve и fill rate по клиентам"""
+    from apps.ads.monitoring import daily_report
+    daily_report()

@@ -52,6 +52,16 @@ app.conf.beat_schedule = {
         'task': 'apps.ads.tasks.cleanup_ad_media',
         'schedule': crontab(minute=30, hour=0),
     },
+    # Мониторинг трафика выдачи: прошлый час из Redis → Postgres, резкое падение трафика клиента
+    # (платформа · версия · User-Agent) → алерт в Telegram; в 09:10 — отчёт за вчера
+    'monitor-serve-traffic-hourly': {
+        'task': 'apps.ads.tasks.monitor_serve_traffic',
+        'schedule': crontab(minute=5),
+    },
+    'report-serve-traffic-daily': {
+        'task': 'apps.ads.tasks.report_serve_traffic',
+        'schedule': crontab(minute=10, hour=9),
+    },
     # Возврат дробного остатка бюджета завершённых заказов
     'refund-completed-orders-every-5-minutes': {
         'task': 'apps.billing.tasks.refund_completed_orders',
