@@ -399,20 +399,9 @@ class UserAccountAdTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data['url'][0], validators.ERR_NOT_PROMOTABLE.format('uz_chat'))
 
-    def test_android_only_devices_rejected_for_user_account(self):
-        boss = make_local_user('boss')
-        boss.is_superuser = True
-        boss.save(update_fields=['is_superuser'])
-        for client in (self.client, client_for(boss)):  # суперадмину — то же: такая реклама нигде не покажется
-            for devices in (['android'], ['ANDROID']):
-                with self.subTest(superadmin=client is not self.client, devices=devices):
-                    response = create_ad(client, Placement.USERS_CHANNEL_MESSAGE, url='https://t.me/shop_admin',
-                                         targeting={'countries': ['UZ'], 'devices': devices})
-                    self.assertEqual(response.status_code, 400)
-                    self.assertEqual(str(response.data['targeting']['devices']),
-                                     validators.ERR_USER_ACCOUNT_DEVICES)
-
-        for devices in ([], ['android', 'ios'], ['desktop']):
+    def test_android_only_devices_allowed_for_user_account(self):
+        """Android с 1.4.0 рисует аккаунт пользователя (старым версиям выдача его не отдаёт) — «только Android» можно"""
+        for devices in ([], ['android'], ['ANDROID'], ['android', 'ios'], ['desktop']):
             with self.subTest(devices=devices):
                 response = create_ad(self.client, Placement.USERS_BOT_BANNER, url='https://t.me/shop_admin',
                                      targeting={'countries': ['UZ'], 'devices': devices})

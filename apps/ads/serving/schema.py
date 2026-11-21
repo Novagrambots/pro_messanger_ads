@@ -34,7 +34,9 @@ SERVE_REQUEST = {
                                          'Нет — страна по IP'},
         'lang': {'type': 'string', 'maxLength': 64, 'description': 'Язык приложения: uz, ru, en-US…'},
         'platform': {'type': 'string', 'maxLength': 64, 'description': 'ios, android или desktop'},
-        'app_version': {'type': 'string', 'maxLength': 64},
+        'app_version': {'type': 'string', 'maxLength': 64,
+                        'description': 'Версия приложения: 1.4.0 (можно «v1.4.0», «1.4.0 (140)»). Android без '
+                                       'версии или ниже 1.4.0 рекламу аккаунта пользователя (USER) не получает'},
     },
 }
 
@@ -58,7 +60,8 @@ AD = {
         },
         'button_type': {'type': 'string', 'enum': ['CHANNEL', 'BOT', 'USER'],
                         'description': 'Текст кнопки переводит клиент. USER — аккаунт пользователя (написать ему); '
-                                       'клиенту с platform=android такие объявления не приходят'},
+                                       'клиенту с platform=android и app_version ниже 1.4.0 (или без неё) такие '
+                                       'объявления не приходят'},
         'media': {
             'type': 'object', 'nullable': True,
             'properties': {

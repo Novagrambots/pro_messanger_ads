@@ -10,6 +10,7 @@
 Аукцион — один на слот: наибольший CPM, при равенстве — случайный.
 """
 import random
+import re
 
 from django.utils import timezone
 
@@ -22,9 +23,33 @@ from .snapshot import allowed_now
 
 
 USER_ACCOUNT = TelegramPeer.PeerType.USER  # аккаунт пользователя
-# Клиенты, которые показывают в рекламе только канал и бота (Android: AdsManager.resolvePromoted).
-# Таргетинг «только эти устройства» для рекламы аккаунта не пропускает validators._users_rules
-NO_USER_ACCOUNT_PLATFORMS = frozenset({'android'})
+# Платформа → первая версия приложения, которая рисует в рекламе аккаунт пользователя. Более старые
+# (Android до 1.4.0: AdsManager.resolvePromoted — только канал и бот) на аккаунте падают с ошибкой
+NO_USER_ACCOUNT_PLATFORMS = {'android': (1, 4, 0)}
+_VERSION_RE = re.compile(r'\d+(?:\.\d+)*')  # «1.4.0», «v1.4», «1.4.0 (140)», «1.4.0-beta» → начало с цифрами
+
+
+def parse_app_version(value):
+    """app_version клиента → кортеж чисел (1, 4, 0) или None, если номера версии в начале строки нет"""
+    if not isinstance(value, str):
+        return None
+    match = _VERSION_RE.match(value.strip().lstrip('vV'))
+    return tuple(int(part) for part in match.group().split('.')) if match else None
+
+
+def skips_user_accounts(platform, app_version):
+    """
+    Клиент не умеет показывать аккаунт пользователя: платформа из NO_USER_ACCOUNT_PLATFORMS, а версия
+    ниже минимальной. Версии нет или она непонятна — считаем старой: пустая плашка лучше ошибки у зрителя
+    """
+    minimum = NO_USER_ACCOUNT_PLATFORMS.get(platform.strip().lower()) if isinstance(platform, str) else None
+    if minimum is None:
+        return False
+    version = parse_app_version(app_version)
+    if version is None:
+        return True
+    width = max(len(version), len(minimum))  # «1.4» == «1.4.0»
+    return version + (0,) * (width - len(version)) < minimum + (0,) * (width - len(minimum))
 
 
 class Slot:
@@ -97,8 +122,9 @@ def candidates_for(snapshot, slot, key, profile=None):
 def pick(snapshot, slot, key, viewer, now=None, profile=None, skip_user_accounts=False):
     """
     Объявление для показа (AdEntry) или None. Один поход в Redis на всех кандидатов.
-    skip_user_accounts — клиент не умеет показывать аккаунт пользователя (Android: только канал и бот):
-    такие объявления в его аукционе не участвуют, иначе выигравший аккаунт = пустое место у зрителя
+    skip_user_accounts — клиент не умеет показывать аккаунт пользователя (skips_user_accounts: Android
+    до 1.4.0 — только канал и бот): такие объявления в его аукционе не участвуют, иначе выигравший аккаунт —
+    ошибка у зрителя
     """
     now = now or timezone.now()
     candidates = [entry for entry in candidates_for(snapshot, slot, key, profile)
